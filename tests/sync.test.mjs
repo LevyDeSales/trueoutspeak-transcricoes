@@ -234,3 +234,12 @@ test('serializes concurrent episode syncs so an older snapshot cannot win', asyn
     /Fonte da transcrição: Estado 008 novo/,
   );
 });
+
+test('rejects a forged reentrant lock capability', async () => {
+  const root = await createRoot();
+
+  await assert.rejects(syncTranscripts({
+    root,
+    lockCapability: Object.freeze({ forged: true }),
+  }), /capability|token.*lock|lock.*inválid/i);
+});

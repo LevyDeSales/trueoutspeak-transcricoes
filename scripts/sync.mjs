@@ -16,6 +16,7 @@ import {
 } from './export.mjs';
 import {
   acquireDerivedArtifactsLock,
+  assertDerivedArtifactsLockCapability,
   attachCleanupWarnings,
   cleanupPathBestEffort,
   promoteAtomically,
@@ -70,12 +71,18 @@ async function listMarkdownFiles(root, relative = 'markdown') {
 export async function syncTranscripts({
   root,
   check = false,
+  lockCapability,
   promotionOperations,
 }) {
   const repositoryRoot = resolve(root);
-  const releaseDerivedArtifactsLock = await acquireDerivedArtifactsLock(
-    repositoryRoot,
-  );
+  let releaseDerivedArtifactsLock = async () => [];
+  if (lockCapability === undefined) {
+    releaseDerivedArtifactsLock = await acquireDerivedArtifactsLock(
+      repositoryRoot,
+    );
+  } else {
+    assertDerivedArtifactsLockCapability(repositoryRoot, lockCapability);
+  }
   const jsonDirectory = join(repositoryRoot, 'json');
   const stagingDirectory = join(
     repositoryRoot,

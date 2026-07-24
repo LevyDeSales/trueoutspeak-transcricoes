@@ -6,7 +6,7 @@ import {
   rm,
 } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const defaultOperations = {
@@ -15,6 +15,7 @@ const defaultOperations = {
   rename,
   rm,
 };
+const derivedLockCapabilities = new WeakMap();
 
 function withDefaultOperations(operations = {}) {
   return { ...defaultOperations, ...operations };
@@ -49,7 +50,16 @@ export function attachCleanupWarnings(error, warnings) {
 }
 
 export function derivedArtifactsLockPath(root) {
-  return join(root, '.trueoutspeak-derived.lock');
+  return join(resolve(root), '.trueoutspeak-derived.lock');
+}
+
+export function assertDerivedArtifactsLockCapability(root, capability) {
+  const record = derivedLockCapabilities.get(capability);
+  if (!record?.active || record.root !== resolve(root)) {
+    throw new Error(
+      'Capability do lock global de artefatos é inválida ou não está ativa.',
+    );
+  }
 }
 
 export async function acquireDerivedArtifactsLock(
@@ -59,7 +69,8 @@ export async function acquireDerivedArtifactsLock(
     retryDelayMs = 10,
   } = {},
 ) {
-  const path = derivedArtifactsLockPath(root);
+  const canonicalRoot = resolve(root);
+  const path = derivedArtifactsLockPath(canonicalRoot);
   const startedAt = Date.now();
   let handle;
 
@@ -86,10 +97,10 @@ export async function acquireDerivedArtifactsLock(
     throw error;
   }
 
-  let released = false;
-  return async () => {
-    if (released) return [];
-    released = true;
+  const record = { active: true, root: canonicalRoot };
+  const release = async () => {
+    if (!record.active) return [];
+    record.active = false;
     const releaseErrors = [];
     try {
       await handle.close();
@@ -109,6 +120,8 @@ export async function acquireDerivedArtifactsLock(
       ].join(' '),
     ];
   };
+  derivedLockCapabilities.set(release, record);
+  return release;
 }
 
 export async function cleanupPathBestEffort(

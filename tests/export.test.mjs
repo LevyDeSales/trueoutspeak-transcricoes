@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -11,9 +12,12 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 
+import { runCorrection } from '../scripts/correct.mjs';
 import { exportTranscripts } from '../scripts/export.mjs';
+import { syncTranscripts } from '../scripts/sync.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -195,4 +199,106 @@ test('attaches staging cleanup warnings to the primary export failure', async ()
     caught.cleanupWarnings[0],
     /cleanup.*staging de exportação.*indisponível/i,
   );
+});
+
+test('serializes export and correction without losing JSON or derived consistency', async () => {
+  const destination = await mkdtemp(
+    join(tmpdir(), 'trueoutspeak-export-correction-'),
+  );
+  await exportTranscripts({ source: join(here, 'fixtures'), destination });
+
+  const source = await mkdtemp(
+    join(tmpdir(), 'trueoutspeak-concurrent-source-'),
+  );
+  const exportedTranscript = JSON.parse(
+    await readFile(join(here, 'fixtures', 'tos-007.json'), 'utf8'),
+  );
+  exportedTranscript.source = 'Export concorrente';
+  await writeFile(
+    join(source, 'tos-007.json'),
+    `${JSON.stringify(exportedTranscript, null, 2)}\n`,
+  );
+
+  let signalExportPaused;
+  const exportPaused = new Promise((resolve) => {
+    signalExportPaused = resolve;
+  });
+  let releaseExport;
+  const exportMayContinue = new Promise((resolve) => {
+    releaseExport = resolve;
+  });
+  let paused = false;
+  const exporting = exportTranscripts({
+    source,
+    destination,
+    promotionOperations: {
+      rename: async (from, to) => {
+        if (
+          !paused
+          && from === join(destination, 'json')
+          && to.includes('.trueoutspeak-export-backup-')
+        ) {
+          paused = true;
+          signalExportPaused();
+          await exportMayContinue;
+        }
+        await rename(from, to);
+      },
+    },
+  });
+  await exportPaused;
+
+  let signalConfirmation;
+  const confirmationReached = new Promise((resolve) => {
+    signalConfirmation = resolve;
+  });
+  let signalSync;
+  const correctionSyncReached = new Promise((resolve) => {
+    signalSync = resolve;
+  });
+  const correcting = runCorrection({
+    root: destination,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => {
+      signalConfirmation();
+      return true;
+    },
+    sync: async (options) => {
+      signalSync();
+      return await syncTranscripts(options);
+    },
+    output: () => {},
+  });
+
+  const confirmedBeforeExportReleased = await Promise.race([
+    confirmationReached.then(() => true),
+    delay(50, false),
+  ]);
+  if (confirmedBeforeExportReleased) {
+    await correctionSyncReached;
+  }
+  releaseExport();
+
+  const results = await Promise.allSettled([exporting, correcting]);
+  assert.deepEqual(
+    results.map(({ status }) => status),
+    ['fulfilled', 'fulfilled'],
+  );
+
+  const finalTranscript = JSON.parse(
+    await readFile(join(destination, 'json', 'tos-007.json'), 'utf8'),
+  );
+  assert.equal(finalTranscript.source, 'Export concorrente');
+  assert.equal(finalTranscript.segments[0].text, 'Outro texto.');
+  assert.deepEqual(await syncTranscripts({
+    root: destination,
+    check: true,
+  }), {
+    changed: [],
+    transcripts: 1,
+    warnings: [],
+  });
 });

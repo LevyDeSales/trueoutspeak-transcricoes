@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -9,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 
 import {
@@ -16,6 +18,7 @@ import {
   findSegment,
   runCorrection,
 } from '../scripts/correct.mjs';
+import { syncTranscripts } from '../scripts/sync.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -41,6 +44,18 @@ async function createCompactRoot() {
     join(root, 'json', 'tos-007.json'),
     `${JSON.stringify(transcript)}\n`,
   );
+  return root;
+}
+
+async function createTwoEpisodeRoot() {
+  const root = await createRoot();
+  const transcript = await fixture();
+  transcript.episodeId = '008';
+  await writeFile(
+    join(root, 'json', 'tos-008.json'),
+    `${JSON.stringify(transcript, null, 2)}\n`,
+  );
+  await syncTranscripts({ root });
   return root;
 }
 
@@ -453,7 +468,7 @@ test('runCorrection aborts if canonical JSON changes during confirmation', async
   assert.equal(syncCalls, 0);
 });
 
-test('runCorrection holds an exclusive writer lock through confirmation', async () => {
+test('runCorrection serializes a second writer behind the global lock', async () => {
   const root = await createRoot();
   let enteredConfirmation;
   const confirmationStarted = new Promise((resolve) => {
@@ -478,18 +493,55 @@ test('runCorrection holds an exclusive writer lock through confirmation', async 
   });
   await confirmationStarted;
 
-  await assert.rejects(runCorrection({
+  let signalSecondConfirmation;
+  const secondConfirmationStarted = new Promise((resolve) => {
+    signalSecondConfirmation = resolve;
+  });
+  const second = runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => {
+      signalSecondConfirmation();
+      return false;
+    },
+    output: () => {},
+  });
+
+  assert.equal(await Promise.race([
+    secondConfirmationStarted.then(() => true),
+    delay(50, false),
+  ]), false);
+
+  releaseConfirmation(false);
+  const settled = await Promise.allSettled([first, second]);
+  assert.deepEqual(
+    settled.map(({ status }) => status),
+    ['fulfilled', 'fulfilled'],
+  );
+});
+
+test('runCorrection removes the stable episode lock directory cleanly', async () => {
+  const root = await createRoot();
+  const output = [];
+
+  await runCorrection({
     root,
     episode: '007',
     selector: { id: 'seg-0001' },
     expectedText: 'Primeiro trecho.',
     text: 'Outro texto.',
     confirm: async () => false,
-    output: () => {},
-  }), /correção.*andamento|lock.*exclusivo/i);
+    output: (line) => output.push(line),
+  });
 
-  releaseConfirmation(false);
-  await first;
+  assert.doesNotMatch(output.join('\n'), /aviso.*locks/i);
+  await assert.rejects(
+    lstat(join(root, '.trueoutspeak-locks')),
+    { code: 'ENOENT' },
+  );
 });
 
 test('runCorrection atomically restores the original JSON when sync fails', async () => {
@@ -621,4 +673,72 @@ test('runCorrection preserves CRLF throughout pretty JSON serialization', async 
   assert.match(updated, /\r\n/);
   assert.doesNotMatch(updated, /(?<!\r)\n/);
   assert.equal(JSON.parse(updated).segments[0].text, 'Outro texto.');
+});
+
+test('runCorrection preserves CRLF pretty style without a final newline', async () => {
+  const root = await createRoot();
+  const path = join(root, 'json', 'tos-007.json');
+  const pretty = (await readFile(path, 'utf8')).replace(/\n$/, '');
+  await writeFile(path, pretty.replaceAll('\n', '\r\n'));
+
+  await runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => true,
+    sync: async () => ({ warnings: [] }),
+    output: () => {},
+  });
+
+  const updated = await readFile(path, 'utf8');
+  assert.match(updated, /\r\n/);
+  assert.doesNotMatch(updated, /(?<!\r)\n/);
+  assert.doesNotMatch(updated, /\r?\n$/);
+  assert.equal(JSON.parse(updated).segments[0].text, 'Outro texto.');
+});
+
+test('two corrections on different episodes finish with consistent derivatives', async () => {
+  const root = await createTwoEpisodeRoot();
+
+  const results = await Promise.all([
+    runCorrection({
+      root,
+      episode: '007',
+      selector: { id: 'seg-0001' },
+      expectedText: 'Primeiro trecho.',
+      text: 'Outro texto.',
+      confirm: async () => true,
+      output: () => {},
+    }),
+    runCorrection({
+      root,
+      episode: '008',
+      selector: { id: 'seg-0001' },
+      expectedText: 'Primeiro trecho.',
+      text: 'Novo texto.',
+      confirm: async () => true,
+      output: () => {},
+    }),
+  ]);
+
+  assert.deepEqual(results.map(({ written }) => written), [true, true]);
+  assert.equal(
+    JSON.parse(
+      await readFile(join(root, 'json', 'tos-007.json'), 'utf8'),
+    ).segments[0].text,
+    'Outro texto.',
+  );
+  assert.equal(
+    JSON.parse(
+      await readFile(join(root, 'json', 'tos-008.json'), 'utf8'),
+    ).segments[0].text,
+    'Novo texto.',
+  );
+  assert.deepEqual(await syncTranscripts({ root, check: true }), {
+    changed: [],
+    transcripts: 2,
+    warnings: [],
+  });
 });

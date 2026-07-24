@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import {
+  mkdir,
   open,
   readFile,
   rename,
   rm,
+  rmdir,
   writeFile,
 } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
@@ -15,6 +17,10 @@ import {
   assertTranscript,
   temporalAnomalyProfile,
 } from './export.mjs';
+import {
+  acquireDerivedArtifactsLock,
+  attachCleanupWarnings,
+} from './atomic-promotion.mjs';
 import { syncTranscripts } from './sync.mjs';
 
 function wordsFromText(text) {
@@ -198,30 +204,47 @@ function preview({ before, after, requiresHumanReview }) {
 
 function serializedTranscript(transcript, originalContent) {
   const original = originalContent.toString('utf8');
-  const newline = original.endsWith('\r\n')
+  const finalNewline = original.endsWith('\r\n')
     ? '\r\n'
     : original.endsWith('\n')
       ? '\n'
       : '';
+  const lineEnding = original.includes('\r\n') ? '\r\n' : '\n';
   const indentation = original.match(/\r?\n([ \t]+)"/)?.[1];
   let serialized = JSON.stringify(transcript, null, indentation);
-  if (newline === '\r\n') {
+  if (lineEnding === '\r\n') {
     serialized = serialized.replaceAll('\n', '\r\n');
   }
   return Buffer.from(
-    `${serialized}${newline}`,
+    `${serialized}${finalNewline}`,
     'utf8',
   );
 }
 
-async function acquireWriterLock(path) {
-  const lockPath = `${path}.lock`;
+async function removeLockDirectoryIfEmpty(lockDirectory) {
+  try {
+    await rmdir(lockDirectory);
+    return [];
+  } catch (error) {
+    if (['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) return [];
+    return [
+      `Cleanup pendente para diretório de locks ${lockDirectory}: ${error.message}`,
+    ];
+  }
+}
+
+async function acquireWriterLock(root, episode) {
+  const lockDirectory = join(root, '.trueoutspeak-locks');
+  const lockPath = join(lockDirectory, `episode-${episode}.lock`);
+  await mkdir(lockDirectory, { recursive: true });
   let handle;
   try {
     handle = await open(lockPath, 'wx');
     await handle.writeFile(`${process.pid}\n`, 'utf8');
   } catch (error) {
     await handle?.close();
+    if (handle) await rm(lockPath, { force: true });
+    await removeLockDirectoryIfEmpty(lockDirectory);
     if (error.code === 'EEXIST') {
       throw new Error(
         `Outra correção já está em andamento; lock exclusivo: ${lockPath}`,
@@ -230,8 +253,23 @@ async function acquireWriterLock(path) {
     throw error;
   }
   return async () => {
-    await handle.close();
-    await rm(lockPath);
+    const warnings = [];
+    try {
+      await handle.close();
+    } catch (error) {
+      warnings.push(
+        `Cleanup pendente para lock do episódio ${lockPath}: ${error.message}`,
+      );
+    }
+    try {
+      await rm(lockPath);
+    } catch (error) {
+      warnings.push(
+        `Cleanup pendente para lock do episódio ${lockPath}: ${error.message}`,
+      );
+    }
+    warnings.push(...await removeLockDirectoryIfEmpty(lockDirectory));
+    return warnings;
   };
 }
 
@@ -252,8 +290,13 @@ export async function runCorrection({
   }
   const repositoryRoot = resolve(root);
   const path = join(repositoryRoot, 'json', `tos-${episode}.json`);
-  const releaseLock = await acquireWriterLock(path);
+  const releaseDerivedArtifactsLock = await acquireDerivedArtifactsLock(
+    repositoryRoot,
+  );
+  let releaseWriterLock = async () => [];
+  let primaryError;
   try {
+    releaseWriterLock = await acquireWriterLock(repositoryRoot, episode);
     const originalContent = await readFile(path);
     const transcript = JSON.parse(originalContent.toString('utf8'));
     assertTranscript(transcript, `tos-${episode}.json`);
@@ -292,7 +335,10 @@ export async function runCorrection({
     }
 
     try {
-      const syncResult = await sync({ root: repositoryRoot });
+      const syncResult = await sync({
+        root: repositoryRoot,
+        lockCapability: releaseDerivedArtifactsLock,
+      });
       for (const warning of syncResult?.warnings ?? []) {
         output(`Aviso: ${warning}`);
       }
@@ -309,8 +355,20 @@ export async function runCorrection({
     }
     output('Correção gravada e artefatos derivados sincronizados.');
     return { written: true, requiresHumanReview: result.requiresHumanReview };
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await releaseLock();
+    const cleanupWarnings = [
+      ...await releaseWriterLock(),
+      ...await releaseDerivedArtifactsLock(),
+    ];
+    for (const warning of cleanupWarnings) {
+      output(`Aviso: ${warning}`);
+    }
+    if (primaryError) {
+      attachCleanupWarnings(primaryError, cleanupWarnings);
+    }
   }
 }
 
