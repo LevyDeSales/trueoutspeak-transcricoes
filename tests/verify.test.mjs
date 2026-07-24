@@ -14,9 +14,11 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 
 import {
+  assertTranscript,
   exportTranscripts,
   renderMarkdown,
 } from '../scripts/export.mjs';
+import { syncTranscripts } from '../scripts/sync.mjs';
 import { verifyRepository } from '../scripts/verify.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -36,6 +38,32 @@ async function createGitRepository() {
   await git(root, 'init');
   await git(root, 'add', '--all');
   return root;
+}
+
+async function validTranscript() {
+  const transcript = JSON.parse(
+    await readFile(join(here, 'fixtures', 'tos-007.json'), 'utf8'),
+  );
+  transcript.fullText = transcript.segments
+    .map(({ text }) => text)
+    .join('\n');
+  return transcript;
+}
+
+async function createExportRoot() {
+  const root = await mkdtemp(join(tmpdir(), 'trueoutspeak-verify-export-'));
+  await exportTranscripts({
+    source: join(here, 'fixtures'),
+    destination: root,
+  });
+  return root;
+}
+
+async function mutateCanonicalTranscript(root, mutate) {
+  const path = join(root, 'json', 'tos-007.json');
+  const transcript = JSON.parse(await readFile(path, 'utf8'));
+  mutate(transcript);
+  await writeFile(path, `${JSON.stringify(transcript, null, 2)}\n`);
 }
 
 test('accepts a complete transcript-only export', async () => {
@@ -58,10 +86,81 @@ test('accepts a complete transcript-only export', async () => {
   });
 });
 
+test('accepts legacy temporal anomalies captured by the versioned profile', async () => {
+  const source = await mkdtemp(join(tmpdir(), 'trueoutspeak-legacy-source-'));
+  const root = await mkdtemp(join(tmpdir(), 'trueoutspeak-legacy-verify-'));
+  const transcript = await validTranscript();
+  transcript.segments[0].words[0].startSeconds = 1;
+  transcript.segments[0].words[1].startSeconds = 0.5;
+  transcript.segments[1].words[0].startSeconds = 60;
+  transcript.segments[1].words[1].startSeconds = 66;
+  await writeFile(
+    join(source, 'tos-007.json'),
+    `${JSON.stringify(transcript, null, 2)}\n`,
+  );
+  await exportTranscripts({ source, destination: root });
+
+  const profile = JSON.parse(
+    await readFile(join(root, 'temporal-anomalies.json'), 'utf8'),
+  );
+  assert.deepEqual(profile, {
+    schemaVersion: 1,
+    episodes: {
+      '007': {
+        'seg-0001': {
+          wordRegression: {
+            count: 1,
+            worstDeltaSeconds: 0.5,
+          },
+        },
+        'seg-0002': {
+          beforeSegment: {
+            count: 1,
+            worstDeltaSeconds: 1.1,
+          },
+          afterSegment: {
+            count: 1,
+            worstDeltaSeconds: 0.5,
+          },
+          outsideDuration: {
+            count: 1,
+            worstDeltaSeconds: 0.5,
+          },
+        },
+      },
+    },
+  });
+
+  const report = await verifyRepository({ root, expectedIds: ['007'] });
+  assert.equal(report.transcripts, 1);
+});
+
 test('ignores untracked scratch files ignored by Git', async () => {
   const root = await createGitRepository();
   await mkdir(join(root, '.superpowers', 'sdd'), { recursive: true });
   await writeFile(join(root, '.superpowers', 'sdd', 'scratch.md'), 'local');
+
+  const report = await verifyRepository({ root, expectedIds: ['007'] });
+
+  assert.equal(report.transcripts, 1);
+});
+
+test('accepts every approved contribution support path', async () => {
+  const root = await createGitRepository();
+  const approvedPaths = [
+    '.github/ISSUE_TEMPLATE/config.yml',
+    '.github/ISSUE_TEMPLATE/correcao-transcricao.yml',
+    '.github/pull_request_template.md',
+    'CONTRIBUTING.md',
+    'docs/superpowers/plans/2026-07-24-contribution-workflow.md',
+    'docs/superpowers/specs/2026-07-24-contribution-workflow-design.md',
+    'scripts/correct.mjs',
+    'tests/correct.test.mjs',
+  ];
+  for (const relativePath of approvedPaths) {
+    await mkdir(dirname(join(root, relativePath)), { recursive: true });
+    await writeFile(join(root, relativePath), 'conteúdo versionado');
+  }
 
   const report = await verifyRepository({ root, expectedIds: ['007'] });
 
@@ -78,6 +177,210 @@ test('rejects a tracked file even when its path is Git-ignored', async () => {
   await assert.rejects(
     verifyRepository({ root, expectedIds: ['007'] }),
     /arquivo não permitido.*proibido\.txt/i,
+  );
+});
+
+test('rejects duplicate segment IDs', async () => {
+  const transcript = await validTranscript();
+  transcript.segments[1].id = transcript.segments[0].id;
+
+  assert.throws(
+    () => assertTranscript(transcript, 'tos-007.json'),
+    /IDs de segmento.*únicos/i,
+  );
+});
+
+test('rejects out-of-order segment IDs', async () => {
+  const transcript = await validTranscript();
+  transcript.segments[0].id = 'seg-0002';
+  transcript.segments[1].id = 'seg-0001';
+
+  assert.throws(
+    () => assertTranscript(transcript, 'tos-007.json'),
+    /IDs de segmento.*ordem crescente/i,
+  );
+});
+
+test('rejects decreasing word timestamps', async () => {
+  const root = await createExportRoot();
+  await mutateCanonicalTranscript(root, (transcript) => {
+    transcript.segments[0].words[0].startSeconds = 1;
+    transcript.segments[0].words[1].startSeconds = 0.5;
+  });
+
+  await assert.rejects(
+    verifyRepository({ root, expectedIds: ['007'] }),
+    /perfil de anomalias temporais.*diverge/i,
+  );
+});
+
+test('rejects word timestamps outside their segment', async () => {
+  const root = await createExportRoot();
+  await mutateCanonicalTranscript(root, (transcript) => {
+    transcript.segments[1].words[0].startSeconds = 60;
+  });
+
+  await assert.rejects(
+    verifyRepository({ root, expectedIds: ['007'] }),
+    /perfil de anomalias temporais.*diverge/i,
+  );
+});
+
+test('rejects word timestamps outside the transcript duration', async () => {
+  const root = await createExportRoot();
+  await mutateCanonicalTranscript(root, (transcript) => {
+    transcript.segments[1].words[1].startSeconds = 66;
+  });
+
+  await assert.rejects(
+    verifyRepository({ root, expectedIds: ['007'] }),
+    /perfil de anomalias temporais.*diverge/i,
+  );
+});
+
+test('rejects segment timestamps outside the transcript duration', async () => {
+  const transcript = await validTranscript();
+  transcript.segments[1].endSeconds = 66;
+
+  assert.throws(
+    () => assertTranscript(transcript, 'tos-007.json'),
+    /segmento.*duração/i,
+  );
+});
+
+test('rejects segment text that diverges from its words', async () => {
+  const transcript = await validTranscript();
+  transcript.segments[0].words[0].text = 'Outro';
+
+  assert.throws(
+    () => assertTranscript(transcript, 'tos-007.json'),
+    /texto do segmento.*palavras/i,
+  );
+});
+
+test('rejects full text that diverges from its segments', async () => {
+  const transcript = await validTranscript();
+  transcript.fullText = transcript.segments.map(({ text }) => text).join(' ');
+
+  assert.throws(
+    () => assertTranscript(transcript, 'tos-007.json'),
+    /texto completo.*segmentos/i,
+  );
+});
+
+test('temporal ratchet rejects increased anomaly counts and deltas', async () => {
+  const { assertTemporalRatchet } = await import('../scripts/verify.mjs');
+  assert.equal(
+    typeof assertTemporalRatchet,
+    'function',
+    'verify must expose the temporal ratchet',
+  );
+  const baseline = {
+    schemaVersion: 1,
+    episodes: {
+      '007': {
+        'seg-0001': {
+          wordRegression: {
+            count: 1,
+            worstDeltaSeconds: 0.5,
+          },
+        },
+      },
+    },
+  };
+
+  const increasedCount = structuredClone(baseline);
+  increasedCount.episodes['007']['seg-0001'].wordRegression.count = 2;
+  assert.throws(
+    () => assertTemporalRatchet(increasedCount, baseline),
+    /ratchet.*wordRegression.*count/i,
+  );
+
+  const increasedDelta = structuredClone(baseline);
+  increasedDelta.episodes['007']['seg-0001']
+    .wordRegression.worstDeltaSeconds = 0.6;
+  assert.throws(
+    () => assertTemporalRatchet(increasedDelta, baseline),
+    /ratchet.*wordRegression.*worstDeltaSeconds/i,
+  );
+
+  const newAnomaly = structuredClone(baseline);
+  newAnomaly.episodes['007']['seg-0002'] = {
+    beforeSegment: {
+      count: 1,
+      worstDeltaSeconds: 0.1,
+    },
+  };
+  assert.throws(
+    () => assertTemporalRatchet(newAnomaly, baseline),
+    /ratchet.*beforeSegment.*count/i,
+  );
+});
+
+test('temporal ratchet accepts a reduced profile with its snapshot updated', async () => {
+  const { assertTemporalRatchet } = await import('../scripts/verify.mjs');
+  assert.equal(
+    typeof assertTemporalRatchet,
+    'function',
+    'verify must expose the temporal ratchet',
+  );
+  const baseline = {
+    schemaVersion: 1,
+    episodes: {
+      '007': {
+        'seg-0001': {
+          wordRegression: {
+            count: 2,
+            worstDeltaSeconds: 0.5,
+          },
+        },
+      },
+    },
+  };
+  const reduced = {
+    schemaVersion: 1,
+    episodes: {
+      '007': {
+        'seg-0001': {
+          wordRegression: {
+            count: 1,
+            worstDeltaSeconds: 0.4,
+          },
+        },
+      },
+    },
+  };
+
+  assert.doesNotThrow(() => assertTemporalRatchet(reduced, baseline));
+});
+
+test('temporal ratchet compares the branch profile with its Git merge-base', async () => {
+  const root = await createExportRoot();
+  await git(root, 'init');
+  await git(root, 'add', '--all');
+  await git(
+    root,
+    '-c',
+    'user.name=TrueOutspeak Tests',
+    '-c',
+    'user.email=tests@example.invalid',
+    'commit',
+    '-m',
+    'baseline',
+  );
+  await mutateCanonicalTranscript(root, (transcript) => {
+    transcript.segments[0].words[0].startSeconds = 1;
+    transcript.segments[0].words[1].startSeconds = 0.5;
+  });
+  await syncTranscripts({ root });
+
+  await assert.rejects(
+    verifyRepository({
+      root,
+      expectedIds: ['007'],
+      baselineRef: 'HEAD',
+    }),
+    /ratchet temporal.*wordRegression.*count/i,
   );
 });
 

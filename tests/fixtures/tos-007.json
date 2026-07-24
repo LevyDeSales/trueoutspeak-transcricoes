@@ -3,7 +3,7 @@
   "episodeId": "007",
   "source": "Modelo de teste",
   "durationSeconds": 65.5,
-  "fullText": "Primeiro trecho. Segundo trecho.",
+  "fullText": "Primeiro trecho.\nSegundo trecho.",
   "segments": [
     {
       "id": "seg-0001",

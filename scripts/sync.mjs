@@ -14,10 +14,16 @@ import { fileURLToPath } from 'node:url';
 import {
   assertTranscript,
   renderMarkdown,
+  temporalAnomalyProfile,
 } from './export.mjs';
 
 const transcriptName = /^tos-(\d{3})\.json$/;
-const derivedNames = ['markdown', 'indice.json', 'MANIFEST.sha256'];
+const derivedNames = [
+  'markdown',
+  'indice.json',
+  'MANIFEST.sha256',
+  'temporal-anomalies.json',
+];
 
 function sha256(content) {
   return createHash('sha256').update(content).digest('hex');
@@ -115,6 +121,7 @@ export async function syncTranscripts({ root, check = false }) {
   const stagingMarkdownDirectory = join(stagingDirectory, 'markdown');
   const expected = new Map();
   const transcripts = [];
+  const transcriptDocuments = [];
   const manifest = [];
 
   await mkdir(stagingMarkdownDirectory, { recursive: true });
@@ -147,6 +154,7 @@ export async function syncTranscripts({ root, check = false }) {
         json: `json/${filename}`,
         markdown: markdownPath,
       });
+      transcriptDocuments.push(transcript);
     }
 
     const indexContent = Buffer.from(
@@ -164,10 +172,23 @@ export async function syncTranscripts({ root, check = false }) {
         .join('\n')}\n`,
       'utf8',
     );
+    const temporalAnomaliesContent = Buffer.from(
+      `${JSON.stringify(
+        temporalAnomalyProfile(transcriptDocuments),
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
     await writeFile(join(stagingDirectory, 'indice.json'), indexContent);
     await writeFile(join(stagingDirectory, 'MANIFEST.sha256'), manifestContent);
+    await writeFile(
+      join(stagingDirectory, 'temporal-anomalies.json'),
+      temporalAnomaliesContent,
+    );
     expected.set('indice.json', indexContent);
     expected.set('MANIFEST.sha256', manifestContent);
+    expected.set('temporal-anomalies.json', temporalAnomaliesContent);
 
     const changed = [];
     for (const [relativePath, content] of expected) {

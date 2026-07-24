@@ -13,6 +13,7 @@ import { promisify } from 'node:util';
 import {
   assertTranscript,
   renderMarkdown,
+  temporalAnomalyProfile,
 } from './export.mjs';
 
 const execFile = promisify(execFileCallback);
@@ -77,23 +78,30 @@ const siteOrImageExtensions = new Set([
 ]);
 const ignoredDirectories = new Set(['.git']);
 const supportFiles = new Set([
+  '.github/ISSUE_TEMPLATE/config.yml',
+  '.github/ISSUE_TEMPLATE/correcao-transcricao.yml',
+  '.github/pull_request_template.md',
   '.github/workflows/verify.yml',
   '.gitignore',
   '.nvmrc',
+  'CONTRIBUTING.md',
   'MANIFEST.sha256',
   'README.md',
+  'docs/superpowers/plans/2026-07-24-contribution-workflow.md',
+  'docs/superpowers/specs/2026-07-24-contribution-workflow-design.md',
   'indice.json',
   'package-lock.json',
   'package.json',
+  'scripts/correct.mjs',
   'scripts/export.mjs',
   'scripts/sync.mjs',
   'scripts/verify.mjs',
+  'tests/correct.test.mjs',
   'tests/export.test.mjs',
   'tests/fixtures/tos-007.json',
   'tests/sync.test.mjs',
   'tests/verify.test.mjs',
-  'docs/superpowers/plans/2026-07-24-contribution-workflow.md',
-  'docs/superpowers/specs/2026-07-24-contribution-workflow-design.md',
+  'temporal-anomalies.json',
 ]);
 
 function isAllowedFile(relativePath) {
@@ -213,11 +221,69 @@ function expectedTranscriptIds() {
   );
 }
 
+export function assertTemporalRatchet(candidate, baseline) {
+  const candidateEpisodes = candidate?.episodes ?? {};
+  const baselineEpisodes = baseline?.episodes ?? {};
+
+  for (const [episodeId, segments] of Object.entries(candidateEpisodes)) {
+    for (const [segmentId, anomalies] of Object.entries(segments)) {
+      for (const [anomalyName, values] of Object.entries(anomalies)) {
+        const baselineValues =
+          baselineEpisodes[episodeId]?.[segmentId]?.[anomalyName] ?? {
+            count: 0,
+            worstDeltaSeconds: 0,
+          };
+        for (const component of ['count', 'worstDeltaSeconds']) {
+          if (values[component] > baselineValues[component]) {
+            throw new Error(
+              [
+                'Ratchet temporal rejeitou aumento',
+                episodeId,
+                segmentId,
+                anomalyName,
+                component,
+                `${baselineValues[component]} → ${values[component]}.`,
+              ].join(' '),
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
+async function temporalProfileAtMergeBase(root, baselineRef) {
+  const options = { maxBuffer: 32 * 1024 * 1024 };
+  const { stdout: mergeBaseOutput } = await execFile(
+    'git',
+    ['-C', root, 'merge-base', 'HEAD', baselineRef],
+    options,
+  );
+  const mergeBase = mergeBaseOutput.trim();
+  try {
+    const { stdout } = await execFile(
+      'git',
+      [
+        '-C',
+        root,
+        'show',
+        `${mergeBase}:temporal-anomalies.json`,
+      ],
+      options,
+    );
+    return JSON.parse(stdout);
+  } catch (error) {
+    if (error.code === 128) return undefined;
+    throw error;
+  }
+}
+
 export async function verifyRepository({
   root,
   expectedIds = expectedTranscriptIds(),
   maxFileBytes = 50 * 1024 * 1024,
   maxTotalBytes = 1024 * 1024 * 1024,
+  baselineRef,
 }) {
   const repositoryRoot = resolve(root);
   const files = await listRepositoryFiles(repositoryRoot);
@@ -304,6 +370,7 @@ export async function verifyRepository({
     total: expectedIds.length,
     transcripts: [],
   };
+  const transcriptDocuments = [];
 
   for (const id of expectedIds) {
     const jsonPath = join(repositoryRoot, 'json', `tos-${id}.json`);
@@ -339,6 +406,37 @@ export async function verifyRepository({
       json: `json/tos-${id}.json`,
       markdown: `markdown/tos-${id}.md`,
     });
+    transcriptDocuments.push(transcript);
+  }
+
+  const expectedTemporalAnomalies = temporalAnomalyProfile(
+    transcriptDocuments,
+  );
+  const temporalAnomalies = JSON.parse(
+    await readFile(
+      join(repositoryRoot, 'temporal-anomalies.json'),
+      'utf8',
+    ),
+  );
+  if (
+    JSON.stringify(temporalAnomalies) !==
+    JSON.stringify(expectedTemporalAnomalies)
+  ) {
+    throw new Error(
+      'Perfil de anomalias temporais diverge das transcrições.',
+    );
+  }
+  if (baselineRef) {
+    const baselineTemporalAnomalies = await temporalProfileAtMergeBase(
+      repositoryRoot,
+      baselineRef,
+    );
+    if (baselineTemporalAnomalies) {
+      assertTemporalRatchet(
+        expectedTemporalAnomalies,
+        baselineTemporalAnomalies,
+      );
+    }
   }
 
   if (JSON.stringify(index) !== JSON.stringify(expectedIndex)) {
@@ -366,10 +464,32 @@ export async function verifyRepository({
   };
 }
 
+function parseArguments(argv) {
+  const options = {
+    root: '.',
+    baselineRef: process.env.TRUEOUTSPEAK_BASELINE_REF || undefined,
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === '--root') options.root = argv[++index];
+    else if (argv[index] === '--baseline-ref') {
+      options.baselineRef = argv[++index];
+    } else {
+      throw new Error(`Argumento desconhecido: ${argv[index]}`);
+    }
+  }
+  if (!options.root) throw new Error('O argumento --root exige um diretório.');
+  if (
+    options.baselineRef === '' ||
+    /^0+$/.test(options.baselineRef ?? '')
+  ) {
+    options.baselineRef = undefined;
+  }
+  return options;
+}
+
 if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
-  const rootIndex = process.argv.indexOf('--root');
-  const root = rootIndex === -1 ? '.' : process.argv[rootIndex + 1];
-  if (!root) throw new Error('O argumento --root exige um diretório.');
-  const report = await verifyRepository({ root });
+  const report = await verifyRepository(
+    parseArguments(process.argv.slice(2)),
+  );
   console.log(JSON.stringify(report, null, 2));
 }

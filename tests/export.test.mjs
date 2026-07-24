@@ -70,6 +70,16 @@ test('exports structured JSON byte-for-byte and a readable timestamped Markdown 
     manifestLines[1],
     /^[a-f0-9]{64}  markdown\/tos-007\.md$/,
   );
+
+  assert.deepEqual(
+    JSON.parse(
+      await readFile(
+        join(destination, 'temporal-anomalies.json'),
+        'utf8',
+      ),
+    ),
+    { schemaVersion: 1, episodes: {} },
+  );
 });
 
 test('rejects overlapping source and destination without deleting the source', async () => {

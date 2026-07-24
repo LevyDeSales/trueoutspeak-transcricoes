@@ -21,6 +21,79 @@ import { fileURLToPath } from 'node:url';
 
 const transcriptName = /^tos-(\d{3})\.json$/;
 
+function roundedDelta(seconds) {
+  return Number(seconds.toFixed(9));
+}
+
+function recordTemporalAnomaly(anomalies, name, delta) {
+  const current = anomalies[name] ?? {
+    count: 0,
+    worstDeltaSeconds: 0,
+  };
+  current.count += 1;
+  current.worstDeltaSeconds = Math.max(
+    current.worstDeltaSeconds,
+    roundedDelta(delta),
+  );
+  anomalies[name] = current;
+}
+
+export function temporalAnomaliesForTranscript(transcript) {
+  const segments = {};
+
+  for (const segment of transcript.segments) {
+    const anomalies = {};
+    let previousWordTimestamp = -Infinity;
+    for (const word of segment.words) {
+      if (word.startSeconds < previousWordTimestamp) {
+        recordTemporalAnomaly(
+          anomalies,
+          'wordRegression',
+          previousWordTimestamp - word.startSeconds,
+        );
+      }
+      if (word.startSeconds < segment.startSeconds) {
+        recordTemporalAnomaly(
+          anomalies,
+          'beforeSegment',
+          segment.startSeconds - word.startSeconds,
+        );
+      }
+      if (word.startSeconds > segment.endSeconds) {
+        recordTemporalAnomaly(
+          anomalies,
+          'afterSegment',
+          word.startSeconds - segment.endSeconds,
+        );
+      }
+      if (word.startSeconds > transcript.durationSeconds) {
+        recordTemporalAnomaly(
+          anomalies,
+          'outsideDuration',
+          word.startSeconds - transcript.durationSeconds,
+        );
+      }
+      previousWordTimestamp = word.startSeconds;
+    }
+    if (Object.keys(anomalies).length > 0) {
+      segments[segment.id] = anomalies;
+    }
+  }
+
+  return segments;
+}
+
+export function temporalAnomalyProfile(transcripts) {
+  const episodes = {};
+  for (const transcript of transcripts) {
+    const segments = temporalAnomaliesForTranscript(transcript);
+    if (Object.keys(segments).length > 0) {
+      episodes[transcript.episodeId] = segments;
+    }
+  }
+  return { schemaVersion: 1, episodes };
+}
+
 function hasExactKeys(value, expectedKeys) {
   return (
     value !== null &&
@@ -67,6 +140,8 @@ export function assertTranscript(transcript, filename) {
     throw new Error(`Transcrição inválida: ${filename}`);
   }
 
+  const segmentIds = new Set();
+  let previousSegmentNumber = -Infinity;
   for (const segment of transcript.segments) {
     if (
       !hasExactKeys(segment, [
@@ -89,6 +164,20 @@ export function assertTranscript(transcript, filename) {
       throw new Error(`Segmento inválido: ${filename}`);
     }
 
+    if (segmentIds.has(segment.id)) {
+      throw new Error(
+        `IDs de segmento devem ser únicos: ${filename}`,
+      );
+    }
+    const segmentNumber = Number(segment.id.slice(4));
+    if (segmentNumber <= previousSegmentNumber) {
+      throw new Error(
+        `IDs de segmento devem estar em ordem crescente: ${filename}`,
+      );
+    }
+    segmentIds.add(segment.id);
+    previousSegmentNumber = segmentNumber;
+
     for (const word of segment.words) {
       if (
         !hasExactKeys(word, ['startSeconds', 'text']) ||
@@ -100,6 +189,29 @@ export function assertTranscript(transcript, filename) {
         throw new Error(`Palavra inválida: ${filename}`);
       }
     }
+
+    if (segment.text !== segment.words.map(({ text }) => text).join(' ')) {
+      throw new Error(
+        `Texto do segmento deve ser derivado das palavras: ${filename}`,
+      );
+    }
+    if (
+      segment.startSeconds > transcript.durationSeconds ||
+      segment.endSeconds > transcript.durationSeconds
+    ) {
+      throw new Error(
+        `Timestamp de segmento deve ficar dentro da duração: ${filename}`,
+      );
+    }
+  }
+
+  if (
+    transcript.fullText !==
+    transcript.segments.map(({ text }) => text).join('\n')
+  ) {
+    throw new Error(
+      `Texto completo deve ser derivado dos segmentos: ${filename}`,
+    );
   }
 }
 
@@ -236,6 +348,7 @@ export async function exportTranscripts({ source, destination }) {
   await mkdir(markdownDirectory, { recursive: true });
 
   const transcripts = [];
+  const transcriptDocuments = [];
   const manifest = [];
 
   try {
@@ -279,6 +392,7 @@ export async function exportTranscripts({ source, destination }) {
         json: `json/${filename}`,
         markdown: `markdown/tos-${id}.md`,
       });
+      transcriptDocuments.push(transcript);
     }
 
     const index = {
@@ -299,11 +413,26 @@ export async function exportTranscripts({ source, destination }) {
         .join('\n')}\n`,
       'utf8',
     );
+    await writeFile(
+      join(stagingDirectory, 'temporal-anomalies.json'),
+      `${JSON.stringify(
+        temporalAnomalyProfile(transcriptDocuments),
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
 
     await promoteStagedExport({
       destinationDirectory,
       stagingDirectory,
-      names: ['json', 'markdown', 'indice.json', 'MANIFEST.sha256'],
+      names: [
+        'json',
+        'markdown',
+        'indice.json',
+        'MANIFEST.sha256',
+        'temporal-anomalies.json',
+      ],
     });
   } catch (error) {
     await rm(stagingDirectory, { recursive: true, force: true });

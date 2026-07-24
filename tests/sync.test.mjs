@@ -40,6 +40,7 @@ test('regenerates Markdown, index, and manifest from canonical fixture JSON', as
       'MANIFEST.sha256',
       'indice.json',
       'markdown/tos-007.md',
+      'temporal-anomalies.json',
     ],
     transcripts: 1,
   });
@@ -78,6 +79,12 @@ test('regenerates Markdown, index, and manifest from canonical fixture JSON', as
     await readFile(join(root, 'MANIFEST.sha256'), 'utf8'),
     `${expectedManifest}\n`,
   );
+  assert.deepEqual(
+    JSON.parse(
+      await readFile(join(root, 'temporal-anomalies.json'), 'utf8'),
+    ),
+    { schemaVersion: 1, episodes: {} },
+  );
 });
 
 test('check reports derived-artifact drift without modifying files', async () => {
@@ -115,6 +122,7 @@ test('failed JSON validation leaves the existing derived tree untouched', async 
     readFile(join(root, 'markdown', 'tos-007.md')),
     readFile(join(root, 'indice.json')),
     readFile(join(root, 'MANIFEST.sha256')),
+    readFile(join(root, 'temporal-anomalies.json')),
   ]);
   await writeFile(
     join(root, 'json', 'tos-008.json'),
@@ -127,6 +135,7 @@ test('failed JSON validation leaves the existing derived tree untouched', async 
     readFile(join(root, 'markdown', 'tos-007.md')),
     readFile(join(root, 'indice.json')),
     readFile(join(root, 'MANIFEST.sha256')),
+    readFile(join(root, 'temporal-anomalies.json')),
   ]);
   assert.deepEqual(derivedAfter, derivedBefore);
 });
