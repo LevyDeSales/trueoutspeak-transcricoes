@@ -255,4 +255,3 @@ git push
 
 Wait for the Verificação workflow to succeed and confirm the published
 CONTRIBUTING and issue form URLs return HTTP 200.
-

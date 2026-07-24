@@ -75,6 +75,7 @@ Não edite manualmente:
 - [`markdown/`](markdown/);
 - [`indice.json`](indice.json);
 - [`MANIFEST.sha256`](MANIFEST.sha256);
+- [`temporal-anomalies.json`](temporal-anomalies.json);
 - arquivos em `scripts/`, testes, workflow de CI ou configurações do projeto,
   quando o seu pull request for apenas uma correção de transcrição; e
 - arquivos de áudio, binários ou conteúdo fora das transcrições.

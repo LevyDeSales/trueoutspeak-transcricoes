@@ -72,4 +72,3 @@ o esquema e as relações word → segment → fullText.
 `CONTRIBUTING.md` será a entrada principal. O README apontará para o guia e
 passará a descrever os JSON como importação original byte a byte com
 correções editoriais versionadas.
-
