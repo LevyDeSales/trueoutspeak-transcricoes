@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "episodeId": "007",
+  "source": "Modelo de teste",
+  "durationSeconds": 65.5,
+  "fullText": "Primeiro trecho. Segundo trecho.",
+  "segments": [
+    {
+      "id": "seg-0001",
+      "startSeconds": 0,
+      "endSeconds": 4.25,
+      "text": "Primeiro trecho.",
+      "words": [
+        {
+          "startSeconds": 0,
+          "text": "Primeiro"
+        },
+        {
+          "startSeconds": 1,
+          "text": "trecho."
+        }
+      ]
+    },
+    {
+      "id": "seg-0002",
+      "startSeconds": 61.1,
+      "endSeconds": 65.5,
+      "text": "Segundo trecho.",
+      "words": [
+        {
+          "startSeconds": 61.1,
+          "text": "Segundo"
+        },
+        {
+          "startSeconds": 62,
+          "text": "trecho."
+        }
+      ]
+    }
+  ]
+}

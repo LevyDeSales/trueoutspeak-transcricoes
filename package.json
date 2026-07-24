@@ -1,0 +1,14 @@
+{
+  "name": "trueoutspeak-transcricoes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "export": "node scripts/export.mjs",
+    "test": "node --test",
+    "verify": "node scripts/verify.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
