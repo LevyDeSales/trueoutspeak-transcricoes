@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
-import { copyFile, mkdir, mkdtemp, readFile } from 'node:fs/promises';
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +29,17 @@ async function createRoot() {
   await copyFile(
     join(here, 'fixtures', 'tos-007.json'),
     join(root, 'json', 'tos-007.json'),
+  );
+  return root;
+}
+
+async function createCompactRoot() {
+  const root = await mkdtemp(join(tmpdir(), 'trueoutspeak-correct-compact-'));
+  const transcript = await fixture();
+  await mkdir(join(root, 'json'));
+  await writeFile(
+    join(root, 'json', 'tos-007.json'),
+    `${JSON.stringify(transcript)}\n`,
   );
   return root;
 }
@@ -211,6 +228,106 @@ test('applyCorrection accepts explicit same-count words with identical timestamp
   assert.equal(result.requiresHumanReview, false);
 });
 
+test('applyCorrection accepts an unchanged legacy temporal profile and rejects each worsened component', async () => {
+  const transcript = await fixture();
+  transcript.segments[0].words[0].startSeconds = 1;
+  transcript.segments[0].words[1].startSeconds = 0.5;
+
+  const unchanged = applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    words: [
+      { startSeconds: 1, text: 'Outro' },
+      { startSeconds: 0.5, text: 'texto.' },
+    ],
+  });
+  assert.equal(unchanged.requiresHumanReview, false);
+
+  assert.throws(() => applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    words: [
+      { startSeconds: 1.2, text: 'Outro' },
+      { startSeconds: 0.5, text: 'texto.' },
+    ],
+  }), /ratchet temporal.*wordRegression.*worstDeltaSeconds/i);
+
+  assert.throws(() => applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto agora.',
+    words: [
+      { startSeconds: 1, text: 'Outro' },
+      { startSeconds: 0.8, text: 'texto' },
+      { startSeconds: 0.7, text: 'agora.' },
+    ],
+  }), /ratchet temporal.*wordRegression.*count/i);
+});
+
+test('applyCorrection accepts an improved legacy temporal profile', async () => {
+  const transcript = await fixture();
+  transcript.segments[0].words[0].startSeconds = 1;
+  transcript.segments[0].words[1].startSeconds = 0.5;
+
+  const result = applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    words: [
+      { startSeconds: 0, text: 'Outro' },
+      { startSeconds: 0.5, text: 'texto.' },
+    ],
+  });
+
+  assert.equal(result.requiresHumanReview, true);
+});
+
+test('applyCorrection handles legacy words containing internal spaces without inventing alignment', async () => {
+  const transcript = await fixture();
+  transcript.segments[0].words = [
+    { startSeconds: 0, text: 'Primeiro trecho.' },
+  ];
+
+  const noOp = applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Primeiro trecho.',
+  });
+  assert.deepEqual(noOp.transcript.segments[0].words, transcript.segments[0].words);
+  assert.equal(noOp.requiresHumanReview, false);
+
+  assert.throws(() => applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+  }), /words\[\].*explícito/i);
+
+  const explicit = applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    words: [{ startSeconds: 0, text: 'Outro texto.' }],
+  });
+  assert.equal(explicit.transcript.segments[0].text, 'Outro texto.');
+  assert.equal(explicit.requiresHumanReview, false);
+});
+
+test('applyCorrection requires explicit word texts to join to correction.text exactly', async () => {
+  const transcript = await fixture();
+
+  assert.throws(() => applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    words: [
+      { startSeconds: 0, text: 'Outro' },
+      { startSeconds: 1, text: 'texto diferente.' },
+    ],
+  }), /words\[\].*texto corrigido/i);
+});
+
 test('applyCorrection applies an explicit word-count reduction and requires review', async () => {
   const transcript = await fixture();
 
@@ -300,6 +417,79 @@ test('runCorrection explains human review when explicit timestamps change', asyn
 
   assert.equal(result.requiresHumanReview, true);
   assert.match(output.join('\n'), /marcação temporal/i);
+  assert.match(
+    output.join('\n'),
+    /\| 1 \| Primeiro \| 0(?:\.0)? s \| Outro \| 0\.1 s \|/,
+  );
+  assert.match(
+    output.join('\n'),
+    /\| 2 \| trecho\. \| 1(?:\.0)? s \| texto\. \| 1\.5 s \|/,
+  );
+});
+
+test('runCorrection aborts if canonical JSON changes during confirmation', async () => {
+  const root = await createRoot();
+  const path = join(root, 'json', 'tos-007.json');
+  const concurrent = await fixture();
+  concurrent.source = 'Edição concorrente';
+  const concurrentContent = `${JSON.stringify(concurrent, null, 2)}\n`;
+  let syncCalls = 0;
+
+  await assert.rejects(runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => {
+      await writeFile(path, concurrentContent);
+      return true;
+    },
+    sync: async () => { syncCalls += 1; },
+    output: () => {},
+  }), /conflito.*alterado/i);
+
+  assert.equal(await readFile(path, 'utf8'), concurrentContent);
+  assert.equal(syncCalls, 0);
+});
+
+test('runCorrection holds an exclusive writer lock through confirmation', async () => {
+  const root = await createRoot();
+  let enteredConfirmation;
+  const confirmationStarted = new Promise((resolve) => {
+    enteredConfirmation = resolve;
+  });
+  let releaseConfirmation;
+  const confirmationResult = new Promise((resolve) => {
+    releaseConfirmation = resolve;
+  });
+
+  const first = runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => {
+      enteredConfirmation();
+      return await confirmationResult;
+    },
+    output: () => {},
+  });
+  await confirmationStarted;
+
+  await assert.rejects(runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => false,
+    output: () => {},
+  }), /correção.*andamento|lock.*exclusivo/i);
+
+  releaseConfirmation(false);
+  await first;
 });
 
 test('runCorrection atomically restores the original JSON when sync fails', async () => {
@@ -318,4 +508,68 @@ test('runCorrection atomically restores the original JSON when sync fails', asyn
   }), /sync indisponível/);
 
   assert.equal(await readFile(path, 'utf8'), before);
+});
+
+test('runCorrection does not overwrite a newer edit while rolling back failed sync', async () => {
+  const root = await createRoot();
+  const path = join(root, 'json', 'tos-007.json');
+  const newer = await fixture();
+  newer.source = 'Conteúdo mais recente';
+  const newerContent = `${JSON.stringify(newer, null, 2)}\n`;
+
+  await assert.rejects(runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => true,
+    sync: async () => {
+      await writeFile(path, newerContent);
+      throw new Error('sync indisponível');
+    },
+    output: () => {},
+  }), /rollback.*conflito|não restaurado.*mais recente/i);
+
+  assert.equal(await readFile(path, 'utf8'), newerContent);
+});
+
+test('runCorrection preserves compact JSON style for no-op and small corrections', async () => {
+  const noOpRoot = await createCompactRoot();
+  const noOpPath = join(noOpRoot, 'json', 'tos-007.json');
+  const beforeNoOp = await readFile(noOpPath);
+
+  await runCorrection({
+    root: noOpRoot,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Primeiro trecho.',
+    confirm: async () => true,
+    sync: async () => ({ warnings: [] }),
+    output: () => {},
+  });
+  assert.deepEqual(await readFile(noOpPath), beforeNoOp);
+
+  const changedRoot = await createCompactRoot();
+  const changedPath = join(changedRoot, 'json', 'tos-007.json');
+  const beforeChanged = await readFile(changedPath, 'utf8');
+  await runCorrection({
+    root: changedRoot,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => true,
+    sync: async () => ({ warnings: [] }),
+    output: () => {},
+  });
+  const afterChanged = await readFile(changedPath, 'utf8');
+
+  assert.equal(afterChanged.split('\n').length, beforeChanged.split('\n').length);
+  assert.ok(
+    Math.abs(afterChanged.length - beforeChanged.length) < 100,
+    'small correction must not trigger pretty-print expansion',
+  );
+  assert.equal(JSON.parse(afterChanged).segments[0].text, 'Outro texto.');
 });

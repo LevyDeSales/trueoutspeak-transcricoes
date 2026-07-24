@@ -1,10 +1,20 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  open,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 
-import { assertTranscript } from './export.mjs';
+import {
+  assertTemporalRatchet,
+  assertTranscript,
+  temporalAnomalyProfile,
+} from './export.mjs';
 import { syncTranscripts } from './sync.mjs';
 
 function wordsFromText(text) {
@@ -53,15 +63,11 @@ export function findSegment(transcript, selector) {
   return matches[0];
 }
 
-function validateExplicitWords({ words, replacementWords, segment, durationSeconds }) {
+function validateExplicitWords({ words, replacementText }) {
   if (!Array.isArray(words) || words.length === 0) {
     throw new Error('Uma alteração de contagem exige words[] explícito.');
   }
-  if (words.length !== replacementWords.length) {
-    throw new Error('words[] deve corresponder à contagem de palavras do texto.');
-  }
-  let previousTimestamp = -Infinity;
-  for (const [index, word] of words.entries()) {
+  for (const word of words) {
     if (
       !word
       || typeof word !== 'object'
@@ -73,20 +79,12 @@ function validateExplicitWords({ words, replacementWords, segment, durationSecon
       || word.startSeconds < 0
       || typeof word.text !== 'string'
       || word.text.trim() === ''
-      || word.text !== replacementWords[index]
     ) {
-      throw new Error('words[] deve conter timestamps e textos válidos que correspondam ao texto.');
+      throw new Error('words[] deve conter timestamps e textos válidos.');
     }
-    if (word.startSeconds > durationSeconds) {
-      throw new Error('words[] não pode conter timestamps após a duração da transcrição.');
-    }
-    if (word.startSeconds < segment.startSeconds || word.startSeconds > segment.endSeconds) {
-      throw new Error('words[] deve conter timestamps dentro do segmento.');
-    }
-    if (word.startSeconds < previousTimestamp) {
-      throw new Error('words[] deve conter timestamps em ordem não decrescente.');
-    }
-    previousTimestamp = word.startSeconds;
+  }
+  if (words.map(({ text }) => text).join(' ') !== replacementText) {
+    throw new Error('words[] deve corresponder exatamente ao texto corrigido.');
   }
 }
 
@@ -97,19 +95,17 @@ export function applyCorrection(transcript, correction) {
     throw new Error('O texto esperado não corresponde ao segmento atual.');
   }
 
-  const replacementWords = wordsFromText(correction.text);
-  const countChanged = replacementWords.length !== segment.words.length;
   const hasExplicitWords = correction.words !== undefined;
-  if (countChanged && !hasExplicitWords) {
-    throw new Error('Uma alteração de contagem exige words[] explícito.');
-  }
   if (hasExplicitWords) {
+    const replacementText = correction.text;
+    if (typeof replacementText !== 'string' || replacementText.trim() === '') {
+      throw new Error('O texto de substituição é obrigatório.');
+    }
     validateExplicitWords({
       words: correction.words,
-      replacementWords,
-      segment,
-      durationSeconds: updated.durationSeconds,
+      replacementText,
     });
+    const countChanged = correction.words.length !== segment.words.length;
     const timestampsChanged = countChanged || segment.words.some((word, index) => (
       word.startSeconds !== correction.words[index].startSeconds
     ));
@@ -117,16 +113,31 @@ export function applyCorrection(transcript, correction) {
     segment.text = segment.words.map(({ text }) => text).join(' ');
     updated.fullText = updated.segments.map(({ text }) => text).join('\n');
     assertTranscript(updated, `tos-${updated.episodeId}.json`);
+    assertTemporalRatchet(
+      temporalAnomalyProfile([updated]),
+      temporalAnomalyProfile([transcript]),
+    );
     return {
       transcript: updated,
       requiresHumanReview: countChanged || timestampsChanged,
     };
-  } else {
-    segment.words = segment.words.map((word, index) => ({
-      ...word,
-      text: replacementWords[index],
-    }));
   }
+
+  if (correction.text === segment.text) {
+    assertTranscript(updated, `tos-${updated.episodeId}.json`);
+    return { transcript: updated, requiresHumanReview: false };
+  }
+
+  const replacementWords = wordsFromText(correction.text);
+  if (replacementWords.length !== segment.words.length) {
+    throw new Error(
+      'A divisão do texto não preserva a contagem; informe words[] explícito.',
+    );
+  }
+  segment.words = segment.words.map((word, index) => ({
+    ...word,
+    text: replacementWords[index],
+  }));
 
   segment.text = segment.words.map(({ text }) => text).join(' ');
   updated.fullText = updated.segments.map(({ text }) => text).join('\n');
@@ -145,8 +156,15 @@ async function atomicWrite(path, content) {
   }
 }
 
-async function atomicWriteJson(path, transcript) {
-  await atomicWrite(path, `${JSON.stringify(transcript, null, 2)}\n`);
+async function atomicWriteJson(path, content) {
+  await atomicWrite(
+    path,
+    content,
+  );
+}
+
+function formatSeconds(seconds) {
+  return `${seconds} s`;
 }
 
 function preview({ before, after, requiresHumanReview }) {
@@ -156,9 +174,61 @@ function preview({ before, after, requiresHumanReview }) {
     `- Depois: ${after.text}`,
   ];
   if (requiresHumanReview) {
+    lines.push(
+      '',
+      '| # | Palavra antes | Timestamp antes | Palavra depois | Timestamp depois |',
+      '| ---: | --- | ---: | --- | ---: |',
+    );
+    const rows = Math.max(before.words.length, after.words.length);
+    for (let index = 0; index < rows; index += 1) {
+      const beforeWord = before.words[index];
+      const afterWord = after.words[index];
+      lines.push(
+        `| ${index + 1} | ${beforeWord?.text ?? '—'} | ${
+          beforeWord ? formatSeconds(beforeWord.startSeconds) : '—'
+        } | ${afterWord?.text ?? '—'} | ${
+          afterWord ? formatSeconds(afterWord.startSeconds) : '—'
+        } |`,
+      );
+    }
     lines.push('- Revisão humana obrigatória: a contagem de palavras ou a marcação temporal mudou.');
   }
   return lines.join('\n');
+}
+
+function serializedTranscript(transcript, originalContent) {
+  const original = originalContent.toString('utf8');
+  const newline = original.endsWith('\r\n')
+    ? '\r\n'
+    : original.endsWith('\n')
+      ? '\n'
+      : '';
+  const indentation = original.match(/\r?\n([ \t]+)"/)?.[1];
+  return Buffer.from(
+    `${JSON.stringify(transcript, null, indentation)}${newline}`,
+    'utf8',
+  );
+}
+
+async function acquireWriterLock(path) {
+  const lockPath = `${path}.lock`;
+  let handle;
+  try {
+    handle = await open(lockPath, 'wx');
+    await handle.writeFile(`${process.pid}\n`, 'utf8');
+  } catch (error) {
+    await handle?.close();
+    if (error.code === 'EEXIST') {
+      throw new Error(
+        `Outra correção já está em andamento; lock exclusivo: ${lockPath}`,
+      );
+    }
+    throw error;
+  }
+  return async () => {
+    await handle.close();
+    await rm(lockPath);
+  };
 }
 
 export async function runCorrection({
@@ -178,33 +248,63 @@ export async function runCorrection({
   }
   const repositoryRoot = resolve(root);
   const path = join(repositoryRoot, 'json', `tos-${episode}.json`);
-  const originalContent = await readFile(path);
-  const transcript = JSON.parse(originalContent.toString('utf8'));
-  assertTranscript(transcript, `tos-${episode}.json`);
-  const before = findSegment(transcript, selector);
-  const result = applyCorrection(transcript, {
-    selector,
-    expectedText,
-    text,
-    words,
-  });
-  const after = findSegment(result.transcript, { id: before.id });
-  output(preview({ before, after, requiresHumanReview: result.requiresHumanReview }));
-
-  if (!await confirm()) {
-    output('Correção cancelada; nenhum arquivo foi alterado.');
-    return { written: false, requiresHumanReview: result.requiresHumanReview };
-  }
-
-  await write(path, result.transcript);
+  const releaseLock = await acquireWriterLock(path);
   try {
-    await sync({ root: repositoryRoot });
-  } catch (error) {
-    await atomicWrite(path, originalContent);
-    throw error;
+    const originalContent = await readFile(path);
+    const transcript = JSON.parse(originalContent.toString('utf8'));
+    assertTranscript(transcript, `tos-${episode}.json`);
+    const before = findSegment(transcript, selector);
+    const result = applyCorrection(transcript, {
+      selector,
+      expectedText,
+      text,
+      words,
+    });
+    const after = findSegment(result.transcript, { id: before.id });
+    output(preview({ before, after, requiresHumanReview: result.requiresHumanReview }));
+
+    if (!await confirm()) {
+      output('Correção cancelada; nenhum arquivo foi alterado.');
+      return { written: false, requiresHumanReview: result.requiresHumanReview };
+    }
+
+    const replacementContent = serializedTranscript(
+      result.transcript,
+      originalContent,
+    );
+    const currentContent = await readFile(path);
+    if (!currentContent.equals(originalContent)) {
+      throw new Error(
+        'Conflito: o JSON canônico foi alterado durante a confirmação; correção abortada.',
+      );
+    }
+
+    await write(path, replacementContent);
+    const writtenContent = await readFile(path);
+    if (!writtenContent.equals(replacementContent)) {
+      throw new Error(
+        'Conflito: o conteúdo gravado diverge da correção preparada.',
+      );
+    }
+
+    try {
+      await sync({ root: repositoryRoot });
+    } catch (error) {
+      const rollbackCandidate = await readFile(path);
+      if (!rollbackCandidate.equals(writtenContent)) {
+        throw new Error(
+          'Rollback não restaurado: conflito com conteúdo mais recente no JSON canônico.',
+          { cause: error },
+        );
+      }
+      await atomicWrite(path, originalContent);
+      throw error;
+    }
+    output('Correção gravada e artefatos derivados sincronizados.');
+    return { written: true, requiresHumanReview: result.requiresHumanReview };
+  } finally {
+    await releaseLock();
   }
-  output('Correção gravada e artefatos derivados sincronizados.');
-  return { written: true, requiresHumanReview: result.requiresHumanReview };
 }
 
 function readOption(argv, index) {

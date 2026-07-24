@@ -11,10 +11,13 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
+  assertTemporalRatchet,
   assertTranscript,
   renderMarkdown,
   temporalAnomalyProfile,
 } from './export.mjs';
+
+export { assertTemporalRatchet } from './export.mjs';
 
 const execFile = promisify(execFileCallback);
 
@@ -219,37 +222,6 @@ function expectedTranscriptIds() {
     { length: 296 },
     (_, index) => String(index + 1).padStart(3, '0'),
   );
-}
-
-export function assertTemporalRatchet(candidate, baseline) {
-  const candidateEpisodes = candidate?.episodes ?? {};
-  const baselineEpisodes = baseline?.episodes ?? {};
-
-  for (const [episodeId, segments] of Object.entries(candidateEpisodes)) {
-    for (const [segmentId, anomalies] of Object.entries(segments)) {
-      for (const [anomalyName, values] of Object.entries(anomalies)) {
-        const baselineValues =
-          baselineEpisodes[episodeId]?.[segmentId]?.[anomalyName] ?? {
-            count: 0,
-            worstDeltaSeconds: 0,
-          };
-        for (const component of ['count', 'worstDeltaSeconds']) {
-          if (values[component] > baselineValues[component]) {
-            throw new Error(
-              [
-                'Ratchet temporal rejeitou aumento',
-                episodeId,
-                segmentId,
-                anomalyName,
-                component,
-                `${baselineValues[component]} → ${values[component]}.`,
-              ].join(' '),
-            );
-          }
-        }
-      }
-    }
-  }
 }
 
 async function resolveCommit(root, ref) {

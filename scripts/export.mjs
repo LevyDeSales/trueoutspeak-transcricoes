@@ -94,6 +94,56 @@ export function temporalAnomalyProfile(transcripts) {
   return { schemaVersion: 1, episodes };
 }
 
+const temporalAnomalyOrder = [
+  'outsideDuration',
+  'beforeSegment',
+  'afterSegment',
+  'wordRegression',
+];
+
+const temporalAnomalyGuidance = {
+  outsideDuration: 'words[] não pode conter timestamps após a duração da transcrição.',
+  beforeSegment: 'words[] deve conter timestamps dentro do segmento.',
+  afterSegment: 'words[] deve conter timestamps dentro do segmento.',
+  wordRegression: 'words[] deve conter timestamps em ordem não decrescente.',
+};
+
+export function assertTemporalRatchet(candidate, baseline) {
+  const candidateEpisodes = candidate?.episodes ?? {};
+  const baselineEpisodes = baseline?.episodes ?? {};
+
+  for (const [episodeId, segments] of Object.entries(candidateEpisodes)) {
+    for (const [segmentId, anomalies] of Object.entries(segments)) {
+      const anomalyNames = Object.keys(anomalies).sort((left, right) => (
+        temporalAnomalyOrder.indexOf(left) - temporalAnomalyOrder.indexOf(right)
+      ));
+      for (const anomalyName of anomalyNames) {
+        const values = anomalies[anomalyName];
+        const baselineValues =
+          baselineEpisodes[episodeId]?.[segmentId]?.[anomalyName] ?? {
+            count: 0,
+            worstDeltaSeconds: 0,
+          };
+        for (const component of ['count', 'worstDeltaSeconds']) {
+          if (values[component] > baselineValues[component]) {
+            throw new Error(
+              [
+                'Ratchet temporal rejeitou aumento',
+                episodeId,
+                segmentId,
+                anomalyName,
+                component,
+                `${baselineValues[component]} → ${values[component]}.`,
+                temporalAnomalyGuidance[anomalyName],
+              ].filter(Boolean).join(' '),
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
 function hasExactKeys(value, expectedKeys) {
   return (
     value !== null &&
