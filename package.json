@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "export": "node scripts/export.mjs",
+    "sync": "node scripts/sync.mjs",
+    "sync:check": "node scripts/sync.mjs --check",
     "test": "node --test",
     "verify": "node scripts/verify.mjs"
   },

@@ -82,10 +82,14 @@ const supportFiles = new Set([
   'package-lock.json',
   'package.json',
   'scripts/export.mjs',
+  'scripts/sync.mjs',
   'scripts/verify.mjs',
   'tests/export.test.mjs',
   'tests/fixtures/tos-007.json',
+  'tests/sync.test.mjs',
   'tests/verify.test.mjs',
+  'docs/superpowers/plans/2026-07-24-contribution-workflow.md',
+  'docs/superpowers/specs/2026-07-24-contribution-workflow-design.md',
 ]);
 
 function isAllowedFile(relativePath) {
