@@ -9,7 +9,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 
@@ -452,6 +452,134 @@ test('direct push baseline rejects a force-pushed reintroduction that merge-base
   await assert.rejects(
     verifyRepository({
       root,
+      expectedIds: ['007'],
+      baselineRef: previousPush,
+      baselineMode: 'direct',
+    }),
+    /ratchet temporal.*wordRegression.*count/i,
+  );
+});
+
+test('push workflow materializes the non-zero baseline SHA without shell interpolation', async () => {
+  const workflow = await readFile(
+    join(here, '..', '.github', 'workflows', 'verify.yml'),
+    'utf8',
+  );
+  const expectedStep = [
+    '      - name: Materializar baseline anterior do push',
+    "        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'",
+    '        env:',
+    '          PUSH_BASELINE_SHA: ${{ github.event.before }}',
+    '        run: git fetch --no-tags --depth=1 origin "$PUSH_BASELINE_SHA"',
+  ].join('\n');
+
+  assert.ok(
+    workflow.includes(expectedStep),
+    'workflow must fetch the push baseline through an environment variable',
+  );
+  assert.doesNotMatch(
+    workflow,
+    /run:\s*git fetch[^\n]*\$\{\{/,
+    'GitHub context must not be interpolated directly into the shell command',
+  );
+  assert.ok(
+    workflow.indexOf(expectedStep) < workflow.indexOf('- run: npm run verify'),
+    'push baseline must be materialized before verification',
+  );
+});
+
+test('clean clone fetches an unreferenced push baseline before direct ratchet comparison', async () => {
+  const source = await mkdtemp(join(tmpdir(), 'trueoutspeak-fetch-source-'));
+  const working = await mkdtemp(join(tmpdir(), 'trueoutspeak-fetch-work-'));
+  const remote = await mkdtemp(join(tmpdir(), 'trueoutspeak-fetch-remote-'));
+  const cloneParent = await mkdtemp(join(tmpdir(), 'trueoutspeak-fetch-clone-'));
+  const clone = join(cloneParent, 'repository');
+  const transcript = await validTranscript();
+  transcript.segments[0].words[0].startSeconds = 1;
+  transcript.segments[0].words[1].startSeconds = 0.5;
+  await writeFile(
+    join(source, 'tos-007.json'),
+    `${JSON.stringify(transcript, null, 2)}\n`,
+  );
+  await exportTranscripts({ source, destination: working });
+  await git(working, 'init');
+  await git(working, 'add', '--all');
+  await git(
+    working,
+    '-c',
+    'user.name=TrueOutspeak Tests',
+    '-c',
+    'user.email=tests@example.invalid',
+    'commit',
+    '-m',
+    'legacy candidate',
+  );
+  const commonAncestor = await git(working, 'rev-parse', 'HEAD');
+
+  await mutateCanonicalTranscript(working, (current) => {
+    current.segments[0].words[0].startSeconds = 0;
+    current.segments[0].words[1].startSeconds = 1;
+  });
+  await syncTranscripts({ root: working });
+  await git(working, 'add', '--all');
+  await git(
+    working,
+    '-c',
+    'user.name=TrueOutspeak Tests',
+    '-c',
+    'user.email=tests@example.invalid',
+    'commit',
+    '-m',
+    'previous push reduced anomaly',
+  );
+  const previousPush = await git(working, 'rev-parse', 'HEAD');
+
+  await git(remote, 'init', '--bare');
+  await git(working, 'remote', 'add', 'origin', pathToFileURL(remote).href);
+  await git(working, 'push', 'origin', 'HEAD:refs/hidden/previous-push');
+  await git(working, 'checkout', '--detach', commonAncestor);
+  await writeFile(join(working, 'README.md'), 'force-pushed candidate\n');
+  await git(working, 'add', 'README.md');
+  await git(
+    working,
+    '-c',
+    'user.name=TrueOutspeak Tests',
+    '-c',
+    'user.email=tests@example.invalid',
+    'commit',
+    '-m',
+    'force-pushed reintroduction',
+  );
+  await git(working, 'push', 'origin', 'HEAD:refs/heads/main');
+
+  await execFile('git', [
+    'clone',
+    '--branch',
+    'main',
+    '--single-branch',
+    '--depth=1',
+    pathToFileURL(remote).href,
+    clone,
+  ]);
+  await assert.rejects(
+    git(clone, 'cat-file', '-e', `${previousPush}^{commit}`),
+  );
+
+  await git(
+    clone,
+    'fetch',
+    '--no-tags',
+    '--depth=1',
+    'origin',
+    previousPush,
+  );
+  assert.equal(
+    await git(clone, 'cat-file', '-t', previousPush),
+    'commit',
+  );
+  await assert.rejects(
+    verifyRepository({
+      root: clone,
       expectedIds: ['007'],
       baselineRef: previousPush,
       baselineMode: 'direct',
