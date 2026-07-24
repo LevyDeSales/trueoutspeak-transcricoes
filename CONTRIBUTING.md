@@ -63,6 +63,13 @@ npm ci
 
 Edite somente os arquivos JSON afetados em [`json/`](json/) por meio de
 `npm run corrigir`. O comando atualiza os artefatos derivados automaticamente.
+Para correções de **timestamp de segmento** ou de **identificação de locutor**,
+use somente o [formulário de issue](https://github.com/LevyDeSales/trueoutspeak-transcricoes/issues/new?template=correcao-transcricao.yml): não envie
+pull request técnico nem edite o JSON diretamente. O formato atual não possui
+um campo de locutor, e a CLI não altera `startSeconds` ou `endSeconds` de
+segmentos. Esse fluxo será reavaliado quando o formato e a CLI oferecerem esse
+suporte.
+
 Não edite manualmente:
 
 - [`markdown/`](markdown/);
