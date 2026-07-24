@@ -25,7 +25,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const execFile = promisify(execFileCallback);
 
 async function git(root, ...args) {
-  await execFile('git', ['-C', root, ...args]);
+  const { stdout } = await execFile('git', ['-C', root, ...args]);
+  return stdout.trim();
 }
 
 async function createGitRepository() {
@@ -379,9 +380,144 @@ test('temporal ratchet compares the branch profile with its Git merge-base', asy
       root,
       expectedIds: ['007'],
       baselineRef: 'HEAD',
+      baselineMode: 'merge-base',
     }),
     /ratchet temporal.*wordRegression.*count/i,
   );
+});
+
+test('direct push baseline rejects a force-pushed reintroduction that merge-base allows', async () => {
+  const source = await mkdtemp(join(tmpdir(), 'trueoutspeak-force-source-'));
+  const root = await mkdtemp(join(tmpdir(), 'trueoutspeak-force-verify-'));
+  const transcript = await validTranscript();
+  transcript.segments[0].words[0].startSeconds = 1;
+  transcript.segments[0].words[1].startSeconds = 0.5;
+  await writeFile(
+    join(source, 'tos-007.json'),
+    `${JSON.stringify(transcript, null, 2)}\n`,
+  );
+  await exportTranscripts({ source, destination: root });
+  await git(root, 'init');
+  await git(root, 'add', '--all');
+  await git(
+    root,
+    '-c',
+    'user.name=TrueOutspeak Tests',
+    '-c',
+    'user.email=tests@example.invalid',
+    'commit',
+    '-m',
+    'legacy baseline',
+  );
+  const commonAncestor = await git(root, 'rev-parse', 'HEAD');
+
+  await mutateCanonicalTranscript(root, (current) => {
+    current.segments[0].words[0].startSeconds = 0;
+    current.segments[0].words[1].startSeconds = 1;
+  });
+  await syncTranscripts({ root });
+  await git(root, 'add', '--all');
+  await git(
+    root,
+    '-c',
+    'user.name=TrueOutspeak Tests',
+    '-c',
+    'user.email=tests@example.invalid',
+    'commit',
+    '-m',
+    'reduce anomaly',
+  );
+  const previousPush = await git(root, 'rev-parse', 'HEAD');
+
+  await git(root, 'checkout', '--detach', commonAncestor);
+  await writeFile(join(root, 'README.md'), 'force-pushed branch\n');
+  await git(root, 'add', 'README.md');
+  await git(
+    root,
+    '-c',
+    'user.name=TrueOutspeak Tests',
+    '-c',
+    'user.email=tests@example.invalid',
+    'commit',
+    '-m',
+    'reintroduce previous snapshot',
+  );
+
+  await assert.doesNotReject(verifyRepository({
+    root,
+    expectedIds: ['007'],
+    baselineRef: previousPush,
+    baselineMode: 'merge-base',
+  }));
+  await assert.rejects(
+    verifyRepository({
+      root,
+      expectedIds: ['007'],
+      baselineRef: previousPush,
+      baselineMode: 'direct',
+    }),
+    /ratchet temporal.*wordRegression.*count/i,
+  );
+});
+
+test('zero push baseline uses the default-branch fallback and rejects regression', async () => {
+  const root = await createExportRoot();
+  await git(root, 'init');
+  await git(root, 'add', '--all');
+  await git(
+    root,
+    '-c',
+    'user.name=TrueOutspeak Tests',
+    '-c',
+    'user.email=tests@example.invalid',
+    'commit',
+    '-m',
+    'default branch baseline',
+  );
+  const fallbackRef = await git(root, 'rev-parse', 'HEAD');
+  await mutateCanonicalTranscript(root, (transcript) => {
+    transcript.segments[0].words[0].startSeconds = 1;
+    transcript.segments[0].words[1].startSeconds = 0.5;
+  });
+  await syncTranscripts({ root });
+
+  await assert.rejects(
+    verifyRepository({
+      root,
+      expectedIds: ['007'],
+      baselineRef: '0000000000000000000000000000000000000000',
+      baselineMode: 'direct',
+      baselineFallbackRef: fallbackRef,
+    }),
+    /ratchet temporal.*wordRegression.*count/i,
+  );
+});
+
+test('zero push baseline permits a true bootstrap when the fallback has no snapshot', async () => {
+  const root = await createExportRoot();
+  await git(root, 'init');
+  await git(root, 'add', '--all');
+  await git(root, 'reset', 'temporal-anomalies.json');
+  await git(
+    root,
+    '-c',
+    'user.name=TrueOutspeak Tests',
+    '-c',
+    'user.email=tests@example.invalid',
+    'commit',
+    '-m',
+    'repository before temporal snapshot',
+  );
+  const fallbackRef = await git(root, 'rev-parse', 'HEAD');
+  await git(root, 'add', 'temporal-anomalies.json');
+
+  await assert.doesNotReject(verifyRepository({
+    root,
+    expectedIds: ['007'],
+    baselineRef: '0000000000000000000000000000000000000000',
+    baselineMode: 'direct',
+    baselineFallbackRef: fallbackRef,
+  }));
 });
 
 test('rejects any audio file even when it is outside transcript directories', async () => {

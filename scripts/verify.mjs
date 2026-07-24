@@ -252,14 +252,18 @@ export function assertTemporalRatchet(candidate, baseline) {
   }
 }
 
-async function temporalProfileAtMergeBase(root, baselineRef) {
+async function resolveCommit(root, ref) {
   const options = { maxBuffer: 32 * 1024 * 1024 };
-  const { stdout: mergeBaseOutput } = await execFile(
+  const { stdout } = await execFile(
     'git',
-    ['-C', root, 'merge-base', 'HEAD', baselineRef],
+    ['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`],
     options,
   );
-  const mergeBase = mergeBaseOutput.trim();
+  return stdout.trim();
+}
+
+async function temporalProfileAtCommit(root, commit) {
+  const options = { maxBuffer: 32 * 1024 * 1024 };
   try {
     const { stdout } = await execFile(
       'git',
@@ -267,7 +271,7 @@ async function temporalProfileAtMergeBase(root, baselineRef) {
         '-C',
         root,
         'show',
-        `${mergeBase}:temporal-anomalies.json`,
+        `${commit}:temporal-anomalies.json`,
       ],
       options,
     );
@@ -278,12 +282,35 @@ async function temporalProfileAtMergeBase(root, baselineRef) {
   }
 }
 
+async function temporalProfileAtBaseline(root, baselineRef, baselineMode) {
+  if (!['direct', 'merge-base'].includes(baselineMode)) {
+    throw new Error(
+      'Baseline temporal exige modo direct ou merge-base.',
+    );
+  }
+  let commit;
+  if (baselineMode === 'direct') {
+    commit = await resolveCommit(root, baselineRef);
+  } else {
+    const options = { maxBuffer: 32 * 1024 * 1024 };
+    const { stdout } = await execFile(
+      'git',
+      ['-C', root, 'merge-base', 'HEAD', baselineRef],
+      options,
+    );
+    commit = stdout.trim();
+  }
+  return await temporalProfileAtCommit(root, commit);
+}
+
 export async function verifyRepository({
   root,
   expectedIds = expectedTranscriptIds(),
   maxFileBytes = 50 * 1024 * 1024,
   maxTotalBytes = 1024 * 1024 * 1024,
   baselineRef,
+  baselineMode,
+  baselineFallbackRef,
 }) {
   const repositoryRoot = resolve(root);
   const files = await listRepositoryFiles(repositoryRoot);
@@ -427,9 +454,22 @@ export async function verifyRepository({
     );
   }
   if (baselineRef) {
-    const baselineTemporalAnomalies = await temporalProfileAtMergeBase(
+    const zeroBaseline = /^0+$/.test(baselineRef);
+    if (zeroBaseline && !baselineFallbackRef) {
+      throw new Error(
+        'Baseline temporal zero exige um ref de fallback.',
+      );
+    }
+    const effectiveBaselineRef = zeroBaseline
+      ? baselineFallbackRef
+      : baselineRef;
+    const effectiveBaselineMode = zeroBaseline
+      ? 'merge-base'
+      : baselineMode;
+    const baselineTemporalAnomalies = await temporalProfileAtBaseline(
       repositoryRoot,
-      baselineRef,
+      effectiveBaselineRef,
+      effectiveBaselineMode,
     );
     if (baselineTemporalAnomalies) {
       assertTemporalRatchet(
@@ -468,20 +508,24 @@ function parseArguments(argv) {
   const options = {
     root: '.',
     baselineRef: process.env.TRUEOUTSPEAK_BASELINE_REF || undefined,
+    baselineMode: process.env.TRUEOUTSPEAK_BASELINE_MODE || undefined,
+    baselineFallbackRef:
+      process.env.TRUEOUTSPEAK_BASELINE_FALLBACK_REF || undefined,
   };
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === '--root') options.root = argv[++index];
     else if (argv[index] === '--baseline-ref') {
       options.baselineRef = argv[++index];
+    } else if (argv[index] === '--baseline-mode') {
+      options.baselineMode = argv[++index];
+    } else if (argv[index] === '--baseline-fallback-ref') {
+      options.baselineFallbackRef = argv[++index];
     } else {
       throw new Error(`Argumento desconhecido: ${argv[index]}`);
     }
   }
   if (!options.root) throw new Error('O argumento --root exige um diretório.');
-  if (
-    options.baselineRef === '' ||
-    /^0+$/.test(options.baselineRef ?? '')
-  ) {
+  if (options.baselineRef === '') {
     options.baselineRef = undefined;
   }
   return options;

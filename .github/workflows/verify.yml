@@ -24,7 +24,9 @@ jobs:
           cache: npm
       - run: npm run verify
         env:
-          TRUEOUTSPEAK_BASELINE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+          TRUEOUTSPEAK_BASELINE_MODE: ${{ github.event_name == 'pull_request' && 'merge-base' || github.event_name == 'push' && 'direct' || '' }}
+          TRUEOUTSPEAK_BASELINE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+          TRUEOUTSPEAK_BASELINE_FALLBACK_REF: ${{ github.event_name == 'push' && format('origin/{0}', github.event.repository.default_branch) || '' }}
       - run: npm run sync:check
       - run: npm ci
       - run: npm test
