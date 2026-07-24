@@ -599,3 +599,26 @@ test('runCorrection reports sync cleanup warnings without rolling back JSON', as
   );
   assert.match(output.join('\n'), /aviso.*cleanup.*backup/i);
 });
+
+test('runCorrection preserves CRLF throughout pretty JSON serialization', async () => {
+  const root = await createRoot();
+  const path = join(root, 'json', 'tos-007.json');
+  const pretty = await readFile(path, 'utf8');
+  await writeFile(path, pretty.replaceAll('\n', '\r\n'));
+
+  await runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => true,
+    sync: async () => ({ warnings: [] }),
+    output: () => {},
+  });
+
+  const updated = await readFile(path, 'utf8');
+  assert.match(updated, /\r\n/);
+  assert.doesNotMatch(updated, /(?<!\r)\n/);
+  assert.equal(JSON.parse(updated).segments[0].text, 'Outro texto.');
+});

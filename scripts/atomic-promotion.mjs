@@ -1,11 +1,13 @@
 import {
   lstat,
   mkdir,
+  open,
   rename,
   rm,
 } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const defaultOperations = {
   lstat,
@@ -26,6 +28,87 @@ async function exists(path, operations) {
     if (error.code === 'ENOENT') return false;
     throw error;
   }
+}
+
+/**
+ * Preserves best-effort cleanup diagnostics on a primary failure.
+ * Callers can inspect the documented Error.cleanupWarnings string array.
+ */
+export function attachCleanupWarnings(error, warnings) {
+  if (!warnings || warnings.length === 0) return error;
+  const cleanupWarnings = [
+    ...(Array.isArray(error.cleanupWarnings) ? error.cleanupWarnings : []),
+    ...warnings,
+  ];
+  Object.defineProperty(error, 'cleanupWarnings', {
+    configurable: true,
+    enumerable: true,
+    value: cleanupWarnings,
+  });
+  return error;
+}
+
+export function derivedArtifactsLockPath(root) {
+  return join(root, '.trueoutspeak-derived.lock');
+}
+
+export async function acquireDerivedArtifactsLock(
+  root,
+  {
+    maxWaitMs = 30_000,
+    retryDelayMs = 10,
+  } = {},
+) {
+  const path = derivedArtifactsLockPath(root);
+  const startedAt = Date.now();
+  let handle;
+
+  while (!handle) {
+    try {
+      handle = await open(path, 'wx');
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (Date.now() - startedAt >= maxWaitMs) {
+        throw new Error(
+          `Lock global de artefatos permaneceu ocupado; inspecione ${path}`,
+          { cause: error },
+        );
+      }
+      await delay(retryDelayMs);
+    }
+  }
+
+  try {
+    await handle.writeFile(`${process.pid}\n`, 'utf8');
+  } catch (error) {
+    await handle.close();
+    await rm(path, { force: true });
+    throw error;
+  }
+
+  let released = false;
+  return async () => {
+    if (released) return [];
+    released = true;
+    const releaseErrors = [];
+    try {
+      await handle.close();
+    } catch (error) {
+      releaseErrors.push(error);
+    }
+    try {
+      await rm(path);
+    } catch (error) {
+      releaseErrors.push(error);
+    }
+    if (releaseErrors.length === 0) return [];
+    return [
+      [
+        `Cleanup pendente para lock global ${path}:`,
+        releaseErrors.map(({ message }) => message).join('; '),
+      ].join(' '),
+    ];
+  };
 }
 
 export async function cleanupPathBestEffort(
@@ -123,6 +206,7 @@ export async function promoteAtomically({
       description: 'backup de rollback',
     });
     if (cleanupWarnings.length > 0) {
+      attachCleanupWarnings(transactionError, cleanupWarnings);
       transactionError.message = `${
         transactionError.message
       } ${cleanupWarnings.join(' ')}`;

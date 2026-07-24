@@ -3,9 +3,11 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -28,6 +30,30 @@ async function createRoot() {
     join(root, 'json', 'tos-007.json'),
   );
   return root;
+}
+
+async function createTwoEpisodeRoot() {
+  const root = await createRoot();
+  const transcript = JSON.parse(
+    await readFile(join(here, 'fixtures', 'tos-007.json'), 'utf8'),
+  );
+  transcript.episodeId = '008';
+  transcript.source = 'Estado 008 inicial';
+  await writeFile(
+    join(root, 'json', 'tos-008.json'),
+    `${JSON.stringify(transcript, null, 2)}\n`,
+  );
+  return root;
+}
+
+async function exists(path) {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 test('regenerates Markdown, index, and manifest from canonical fixture JSON', async () => {
@@ -140,4 +166,71 @@ test('failed JSON validation leaves the existing derived tree untouched', async 
     readFile(join(root, 'temporal-anomalies.json')),
   ]);
   assert.deepEqual(derivedAfter, derivedBefore);
+});
+
+test('serializes concurrent episode syncs so an older snapshot cannot win', async () => {
+  const root = await createTwoEpisodeRoot();
+  await syncTranscripts({ root });
+
+  const episode007Path = join(root, 'json', 'tos-007.json');
+  const episode007 = JSON.parse(await readFile(episode007Path, 'utf8'));
+  episode007.source = 'Estado 007 novo';
+  await writeFile(episode007Path, `${JSON.stringify(episode007, null, 2)}\n`);
+
+  let signalFirstPromotion;
+  const firstPromotionStarted = new Promise((resolve) => {
+    signalFirstPromotion = resolve;
+  });
+  let releaseFirstPromotion;
+  const firstPromotionMayContinue = new Promise((resolve) => {
+    releaseFirstPromotion = resolve;
+  });
+  let firstPaused = false;
+  const firstSync = syncTranscripts({
+    root,
+    promotionOperations: {
+      rename: async (source, destination) => {
+        if (
+          !firstPaused
+          && source === join(root, 'markdown')
+          && destination.includes('.trueoutspeak-sync-backup-')
+        ) {
+          firstPaused = true;
+          signalFirstPromotion();
+          await firstPromotionMayContinue;
+        }
+        await rename(source, destination);
+      },
+    },
+  });
+  await firstPromotionStarted;
+
+  const episode008Path = join(root, 'json', 'tos-008.json');
+  const episode008 = JSON.parse(await readFile(episode008Path, 'utf8'));
+  episode008.source = 'Estado 008 novo';
+  await writeFile(episode008Path, `${JSON.stringify(episode008, null, 2)}\n`);
+
+  const globalLockPresent = await exists(
+    join(root, '.trueoutspeak-derived.lock'),
+  );
+  const secondSync = syncTranscripts({ root });
+  if (!globalLockPresent) {
+    await secondSync;
+  }
+  releaseFirstPromotion();
+  const results = await Promise.all([firstSync, secondSync]);
+
+  assert.deepEqual(results.map(({ transcripts }) => transcripts), [2, 2]);
+  assert.deepEqual(await syncTranscripts({ root, check: true }), {
+    changed: [],
+    transcripts: 2,
+    warnings: [],
+  });
+  const index = JSON.parse(await readFile(join(root, 'indice.json'), 'utf8'));
+  assert.equal(index.transcripts[0].source, 'Estado 007 novo');
+  assert.equal(index.transcripts[1].source, 'Estado 008 novo');
+  assert.match(
+    await readFile(join(root, 'markdown', 'tos-008.md'), 'utf8'),
+    /Fonte da transcrição: Estado 008 novo/,
+  );
 });

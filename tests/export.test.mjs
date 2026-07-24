@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rm,
   symlink,
   writeFile,
 } from 'node:fs/promises';
@@ -159,5 +160,39 @@ test('keeps the previous export intact when new source validation fails', async 
   assert.equal(
     await readFile(join(destination, 'markdown', 'sentinela.txt'), 'utf8'),
     'markdown anterior',
+  );
+});
+
+test('attaches staging cleanup warnings to the primary export failure', async () => {
+  const destination = await mkdtemp(
+    join(tmpdir(), 'trueoutspeak-cleanup-warning-'),
+  );
+  const source = await mkdtemp(join(tmpdir(), 'trueoutspeak-invalid-json-'));
+  await writeFile(join(source, 'tos-007.json'), '{"schemaVersion":1}\n');
+  let caught;
+
+  try {
+    await exportTranscripts({
+      source,
+      destination,
+      promotionOperations: {
+        rm: async (path, options) => {
+          if (path.includes('.trueoutspeak-export-stage-')) {
+            throw new Error('cleanup de staging indisponível');
+          }
+          await rm(path, options);
+        },
+      },
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.ok(caught, 'invalid export must reject');
+  assert.match(caught.message, /transcrição inválida/i);
+  assert.deepEqual(caught.cleanupWarnings?.length, 1);
+  assert.match(
+    caught.cleanupWarnings[0],
+    /cleanup.*staging de exportação.*indisponível/i,
   );
 });

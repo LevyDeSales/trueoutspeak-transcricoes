@@ -17,6 +17,8 @@ import {
 import { fileURLToPath } from 'node:url';
 
 import {
+  acquireDerivedArtifactsLock,
+  attachCleanupWarnings,
   cleanupPathBestEffort,
   promoteAtomically,
 } from './atomic-promotion.mjs';
@@ -331,25 +333,28 @@ export async function exportTranscripts({
     );
   }
 
-  const files = (await readdir(sourceDirectory))
-    .filter((filename) => transcriptName.test(filename))
-    .sort((left, right) => left.localeCompare(right, 'en'));
-
+  const releaseDerivedArtifactsLock = await acquireDerivedArtifactsLock(
+    destinationDirectory,
+  );
   const stagingDirectory = join(
     destinationDirectory,
     `.trueoutspeak-export-stage-${randomUUID()}`,
   );
   const jsonDirectory = join(stagingDirectory, 'json');
   const markdownDirectory = join(stagingDirectory, 'markdown');
-  await mkdir(jsonDirectory, { recursive: true });
-  await mkdir(markdownDirectory, { recursive: true });
 
   const transcripts = [];
   const transcriptDocuments = [];
   const manifest = [];
   const warnings = [];
+  let primaryError;
 
   try {
+    await mkdir(jsonDirectory, { recursive: true });
+    await mkdir(markdownDirectory, { recursive: true });
+    const files = (await readdir(sourceDirectory))
+      .filter((filename) => transcriptName.test(filename))
+      .sort((left, right) => left.localeCompare(right, 'en'));
     for (const filename of files) {
       const match = transcriptName.exec(filename);
       const id = match[1];
@@ -435,11 +440,19 @@ export async function exportTranscripts({
       operations: promotionOperations,
     });
     warnings.push(...promotion.warnings);
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    warnings.push(...await cleanupPathBestEffort(stagingDirectory, {
+    const cleanupWarnings = await cleanupPathBestEffort(stagingDirectory, {
       operations: promotionOperations,
       description: 'staging de exportação',
-    }));
+    });
+    cleanupWarnings.push(...await releaseDerivedArtifactsLock());
+    warnings.push(...cleanupWarnings);
+    if (primaryError) {
+      attachCleanupWarnings(primaryError, cleanupWarnings);
+    }
   }
 
   return {

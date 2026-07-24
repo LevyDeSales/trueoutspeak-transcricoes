@@ -204,8 +204,12 @@ function serializedTranscript(transcript, originalContent) {
       ? '\n'
       : '';
   const indentation = original.match(/\r?\n([ \t]+)"/)?.[1];
+  let serialized = JSON.stringify(transcript, null, indentation);
+  if (newline === '\r\n') {
+    serialized = serialized.replaceAll('\n', '\r\n');
+  }
   return Buffer.from(
-    `${JSON.stringify(transcript, null, indentation)}${newline}`,
+    `${serialized}${newline}`,
     'utf8',
   );
 }

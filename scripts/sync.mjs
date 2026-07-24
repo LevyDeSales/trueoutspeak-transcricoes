@@ -15,6 +15,8 @@ import {
   temporalAnomalyProfile,
 } from './export.mjs';
 import {
+  acquireDerivedArtifactsLock,
+  attachCleanupWarnings,
   cleanupPathBestEffort,
   promoteAtomically,
 } from './atomic-promotion.mjs';
@@ -71,10 +73,10 @@ export async function syncTranscripts({
   promotionOperations,
 }) {
   const repositoryRoot = resolve(root);
+  const releaseDerivedArtifactsLock = await acquireDerivedArtifactsLock(
+    repositoryRoot,
+  );
   const jsonDirectory = join(repositoryRoot, 'json');
-  const files = (await readdir(jsonDirectory))
-    .filter((filename) => transcriptName.test(filename))
-    .sort((left, right) => left.localeCompare(right, 'en'));
   const stagingDirectory = join(
     repositoryRoot,
     `.trueoutspeak-sync-stage-${randomUUID()}`,
@@ -85,9 +87,13 @@ export async function syncTranscripts({
   const transcriptDocuments = [];
   const manifest = [];
   const warnings = [];
+  let primaryError;
 
-  await mkdir(stagingMarkdownDirectory, { recursive: true });
   try {
+    await mkdir(stagingMarkdownDirectory, { recursive: true });
+    const files = (await readdir(jsonDirectory))
+      .filter((filename) => transcriptName.test(filename))
+      .sort((left, right) => left.localeCompare(right, 'en'));
     for (const filename of files) {
       const id = transcriptName.exec(filename)[1];
       const jsonPath = join(jsonDirectory, filename);
@@ -177,11 +183,19 @@ export async function syncTranscripts({
     }
 
     return { changed, transcripts: transcripts.length, warnings };
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    warnings.push(...await cleanupPathBestEffort(stagingDirectory, {
+    const cleanupWarnings = await cleanupPathBestEffort(stagingDirectory, {
       operations: promotionOperations,
       description: 'staging de sincronização',
-    }));
+    });
+    cleanupWarnings.push(...await releaseDerivedArtifactsLock());
+    warnings.push(...cleanupWarnings);
+    if (primaryError) {
+      attachCleanupWarnings(primaryError, cleanupWarnings);
+    }
   }
 }
 
