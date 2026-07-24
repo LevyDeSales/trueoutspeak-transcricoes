@@ -1,0 +1,71 @@
+name: Correção de transcrição
+description: Registre uma correção verificável para um trecho de episódio.
+title: "Correção: TOS-___ em __:__:__"
+labels:
+  - correção de transcrição
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado por ajudar a revisar o acervo. Consulte o [guia de contribuição](https://github.com/LevyDeSales/trueoutspeak-transcricoes/blob/main/CONTRIBUTING.md) para saber quais evidências usar e quais correções cabem no projeto.
+  - type: input
+    id: episodio
+    attributes:
+      label: Episódio
+      description: Informe o código no formato TOS-001 a TOS-296.
+      placeholder: TOS-007
+    validations:
+      required: true
+  - type: input
+    id: timestamp
+    attributes:
+      label: Timestamp
+      description: Informe o instante ou intervalo em que o trecho ocorre.
+      placeholder: "00:01–00:04 ou 0–4.25 s"
+    validations:
+      required: true
+  - type: textarea
+    id: trecho_atual
+    attributes:
+      label: Trecho atual
+      description: Copie o texto como aparece hoje, incluindo pontuação.
+      placeholder: Primeiro trecho.
+    validations:
+      required: true
+  - type: textarea
+    id: texto_proposto
+    attributes:
+      label: Texto proposto
+      description: Escreva exatamente o texto que deve substituir o trecho atual.
+      placeholder: Outro texto.
+    validations:
+      required: true
+  - type: dropdown
+    id: categoria
+    attributes:
+      label: Categoria
+      options:
+        - Fala
+        - Nome próprio
+        - Citação
+        - Pontuação
+        - Timestamp
+        - Identificação de locutor
+        - Outra correção verificável
+    validations:
+      required: true
+  - type: textarea
+    id: evidencia
+    attributes:
+      label: Justificativa e evidência
+      description: Explique o motivo e informe timestamp, fonte primária, edição/página ou referência confiável.
+      placeholder: "Ouvi o trecho entre 00:01 e 00:04; a fonte citada é ..."
+    validations:
+      required: true
+  - type: checkboxes
+    id: boa_fe
+    attributes:
+      label: Confirmação
+      options:
+        - label: Confirmo que esta proposta foi feita de boa-fé e que a evidência apresentada sustenta a alteração.
+          required: true

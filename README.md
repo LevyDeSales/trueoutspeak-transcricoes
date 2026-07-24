@@ -12,8 +12,9 @@ verificá-las — não contém áudio, imagens nem uma cópia do site.
 - [`markdown/`](markdown/): versão legível, separada por episódio e com
   marcações de tempo.
 - [`json/`](json/): dados estruturados completos, incluindo texto integral,
-  segmentos e marcações por palavra. Os arquivos são cópias byte a byte dos
-  dados canônicos do espelho.
+  segmentos e marcações por palavra. Os arquivos começam como uma importação
+  original byte a byte dos dados canônicos do espelho e recebem correções
+  editoriais versionadas.
 - [`indice.json`](indice.json): índice ordenado das 296 transcrições.
 - [`MANIFEST.sha256`](MANIFEST.sha256): hashes de integridade dos 592
   arquivos de transcrição.
@@ -38,6 +39,13 @@ declarada nos arquivos é `Groq whisper-large-v3`.
 Transcrições automáticas podem conter nomes, pontuação ou palavras
 incorretas. Consulte as marcações de tempo e os dados estruturados ao revisar
 um trecho.
+
+## Contribua com correções
+
+Você pode comunicar uma correção sem conhecimento técnico ou enviar uma
+alteração revisável por pull request. Leia o
+[guia de contribuição](CONTRIBUTING.md) para registrar evidências, usar a
+ferramenta de correção e revisar timestamps.
 
 ## Verificação
 
