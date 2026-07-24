@@ -53,13 +53,14 @@ export function findSegment(transcript, selector) {
   return matches[0];
 }
 
-function validateExplicitWords(words, replacementWords) {
+function validateExplicitWords({ words, replacementWords, segment, durationSeconds }) {
   if (!Array.isArray(words) || words.length === 0) {
     throw new Error('Uma alteração de contagem exige words[] explícito.');
   }
   if (words.length !== replacementWords.length) {
     throw new Error('words[] deve corresponder à contagem de palavras do texto.');
   }
+  let previousTimestamp = -Infinity;
   for (const [index, word] of words.entries()) {
     if (
       !word
@@ -76,6 +77,16 @@ function validateExplicitWords(words, replacementWords) {
     ) {
       throw new Error('words[] deve conter timestamps e textos válidos que correspondam ao texto.');
     }
+    if (word.startSeconds > durationSeconds) {
+      throw new Error('words[] não pode conter timestamps após a duração da transcrição.');
+    }
+    if (word.startSeconds < segment.startSeconds || word.startSeconds > segment.endSeconds) {
+      throw new Error('words[] deve conter timestamps dentro do segmento.');
+    }
+    if (word.startSeconds < previousTimestamp) {
+      throw new Error('words[] deve conter timestamps em ordem não decrescente.');
+    }
+    previousTimestamp = word.startSeconds;
   }
 }
 
@@ -88,9 +99,28 @@ export function applyCorrection(transcript, correction) {
 
   const replacementWords = wordsFromText(correction.text);
   const countChanged = replacementWords.length !== segment.words.length;
-  if (countChanged) {
-    validateExplicitWords(correction.words, replacementWords);
+  const hasExplicitWords = correction.words !== undefined;
+  if (countChanged && !hasExplicitWords) {
+    throw new Error('Uma alteração de contagem exige words[] explícito.');
+  }
+  if (hasExplicitWords) {
+    validateExplicitWords({
+      words: correction.words,
+      replacementWords,
+      segment,
+      durationSeconds: updated.durationSeconds,
+    });
+    const timestampsChanged = countChanged || segment.words.some((word, index) => (
+      word.startSeconds !== correction.words[index].startSeconds
+    ));
     segment.words = structuredClone(correction.words);
+    segment.text = segment.words.map(({ text }) => text).join(' ');
+    updated.fullText = updated.segments.map(({ text }) => text).join('\n');
+    assertTranscript(updated, `tos-${updated.episodeId}.json`);
+    return {
+      transcript: updated,
+      requiresHumanReview: countChanged || timestampsChanged,
+    };
   } else {
     segment.words = segment.words.map((word, index) => ({
       ...word,
@@ -101,18 +131,22 @@ export function applyCorrection(transcript, correction) {
   segment.text = segment.words.map(({ text }) => text).join(' ');
   updated.fullText = updated.segments.map(({ text }) => text).join('\n');
   assertTranscript(updated, `tos-${updated.episodeId}.json`);
-  return { transcript: updated, requiresHumanReview: countChanged };
+  return { transcript: updated, requiresHumanReview: false };
 }
 
-async function atomicWriteJson(path, transcript) {
+async function atomicWrite(path, content) {
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporaryPath, `${JSON.stringify(transcript, null, 2)}\n`, 'utf8');
+    await writeFile(temporaryPath, content, 'utf8');
     await rename(temporaryPath, path);
   } catch (error) {
     await rm(temporaryPath, { force: true });
     throw error;
   }
+}
+
+async function atomicWriteJson(path, transcript) {
+  await atomicWrite(path, `${JSON.stringify(transcript, null, 2)}\n`);
 }
 
 function preview({ before, after, requiresHumanReview }) {
@@ -122,7 +156,7 @@ function preview({ before, after, requiresHumanReview }) {
     `- Depois: ${after.text}`,
   ];
   if (requiresHumanReview) {
-    lines.push('- Revisão humana obrigatória: a contagem de palavras mudou.');
+    lines.push('- Revisão humana obrigatória: a contagem de palavras ou a marcação temporal mudou.');
   }
   return lines.join('\n');
 }
@@ -144,7 +178,8 @@ export async function runCorrection({
   }
   const repositoryRoot = resolve(root);
   const path = join(repositoryRoot, 'json', `tos-${episode}.json`);
-  const transcript = JSON.parse(await readFile(path, 'utf8'));
+  const originalContent = await readFile(path);
+  const transcript = JSON.parse(originalContent.toString('utf8'));
   assertTranscript(transcript, `tos-${episode}.json`);
   const before = findSegment(transcript, selector);
   const result = applyCorrection(transcript, {
@@ -162,7 +197,12 @@ export async function runCorrection({
   }
 
   await write(path, result.transcript);
-  await sync({ root: repositoryRoot });
+  try {
+    await sync({ root: repositoryRoot });
+  } catch (error) {
+    await atomicWrite(path, originalContent);
+    throw error;
+  }
   output('Correção gravada e artefatos derivados sincronizados.');
   return { written: true, requiresHumanReview: result.requiresHumanReview };
 }

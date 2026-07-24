@@ -111,6 +111,122 @@ test('applyCorrection validates explicit words and flags count changes for human
   ]);
 });
 
+test('applyCorrection rejects explicit word timestamps in decreasing order', async () => {
+  const transcript = await fixture();
+
+  assert.throws(() => applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Primeiro novo trecho.',
+    words: [
+      { startSeconds: 1, text: 'Primeiro' },
+      { startSeconds: 0.5, text: 'novo' },
+      { startSeconds: 2, text: 'trecho.' },
+    ],
+  }), /não decrescente/i);
+});
+
+test('applyCorrection rejects an explicit timestamp before the segment', async () => {
+  const transcript = await fixture();
+
+  assert.throws(() => applyCorrection(transcript, {
+    selector: { id: 'seg-0002' },
+    expectedText: 'Segundo trecho.',
+    text: 'Segundo novo trecho.',
+    words: [
+      { startSeconds: 60, text: 'Segundo' },
+      { startSeconds: 62, text: 'novo' },
+      { startSeconds: 63, text: 'trecho.' },
+    ],
+  }), /dentro do segmento/i);
+});
+
+test('applyCorrection rejects an explicit timestamp after the segment', async () => {
+  const transcript = await fixture();
+
+  assert.throws(() => applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Primeiro novo trecho.',
+    words: [
+      { startSeconds: 0, text: 'Primeiro' },
+      { startSeconds: 1, text: 'novo' },
+      { startSeconds: 4.5, text: 'trecho.' },
+    ],
+  }), /dentro do segmento/i);
+});
+
+test('applyCorrection rejects an explicit timestamp after the transcript duration', async () => {
+  const transcript = await fixture();
+
+  assert.throws(() => applyCorrection(transcript, {
+    selector: { id: 'seg-0002' },
+    expectedText: 'Segundo trecho.',
+    text: 'Segundo novo trecho.',
+    words: [
+      { startSeconds: 61.1, text: 'Segundo' },
+      { startSeconds: 62, text: 'novo' },
+      { startSeconds: 66, text: 'trecho.' },
+    ],
+  }), /duração/i);
+});
+
+test('applyCorrection applies explicit same-count words and flags changed timestamps', async () => {
+  const transcript = await fixture();
+
+  const result = applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    words: [
+      { startSeconds: 0.1, text: 'Outro' },
+      { startSeconds: 1.5, text: 'texto.' },
+    ],
+  });
+
+  assert.deepEqual(result.transcript.segments[0].words, [
+    { startSeconds: 0.1, text: 'Outro' },
+    { startSeconds: 1.5, text: 'texto.' },
+  ]);
+  assert.equal(result.requiresHumanReview, true);
+});
+
+test('applyCorrection accepts explicit same-count words with identical timestamps without review', async () => {
+  const transcript = await fixture();
+
+  const result = applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    words: [
+      { startSeconds: 0, text: 'Outro' },
+      { startSeconds: 1, text: 'texto.' },
+    ],
+  });
+
+  assert.deepEqual(result.transcript.segments[0].words, [
+    { startSeconds: 0, text: 'Outro' },
+    { startSeconds: 1, text: 'texto.' },
+  ]);
+  assert.equal(result.requiresHumanReview, false);
+});
+
+test('applyCorrection applies an explicit word-count reduction and requires review', async () => {
+  const transcript = await fixture();
+
+  const result = applyCorrection(transcript, {
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Primeiro',
+    words: [{ startSeconds: 0, text: 'Primeiro' }],
+  });
+
+  assert.deepEqual(result.transcript.segments[0].words, [
+    { startSeconds: 0, text: 'Primeiro' },
+  ]);
+  assert.equal(result.requiresHumanReview, true);
+});
+
 test('applyCorrection rebuilds segment text and transcript fullText', async () => {
   const transcript = await fixture();
 
@@ -162,4 +278,44 @@ test('runCorrection previews a replacement selected by its old excerpt', async (
 
   assert.equal(result.written, false);
   assert.match(output.join('\n'), /Depois: Outro texto\./);
+});
+
+test('runCorrection explains human review when explicit timestamps change', async () => {
+  const root = await createRoot();
+  const output = [];
+
+  const result = await runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    words: [
+      { startSeconds: 0.1, text: 'Outro' },
+      { startSeconds: 1.5, text: 'texto.' },
+    ],
+    confirm: async () => false,
+    output: (line) => output.push(line),
+  });
+
+  assert.equal(result.requiresHumanReview, true);
+  assert.match(output.join('\n'), /marcação temporal/i);
+});
+
+test('runCorrection atomically restores the original JSON when sync fails', async () => {
+  const root = await createRoot();
+  const path = join(root, 'json', 'tos-007.json');
+  const before = await readFile(path, 'utf8');
+
+  await assert.rejects(runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => true,
+    sync: async () => { throw new Error('sync indisponível'); },
+  }), /sync indisponível/);
+
+  assert.equal(await readFile(path, 'utf8'), before);
 });
