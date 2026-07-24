@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   mkdir,
@@ -9,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import test from 'node:test';
 
 import {
@@ -18,6 +20,23 @@ import {
 import { verifyRepository } from '../scripts/verify.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const execFile = promisify(execFileCallback);
+
+async function git(root, ...args) {
+  await execFile('git', ['-C', root, ...args]);
+}
+
+async function createGitRepository() {
+  const root = await mkdtemp(join(tmpdir(), 'trueoutspeak-git-verify-'));
+  await exportTranscripts({
+    source: join(here, 'fixtures'),
+    destination: root,
+  });
+  await writeFile(join(root, '.gitignore'), '.superpowers/\n');
+  await git(root, 'init');
+  await git(root, 'add', '--all');
+  return root;
+}
 
 test('accepts a complete transcript-only export', async () => {
   const root = await mkdtemp(join(tmpdir(), 'trueoutspeak-verify-'));
@@ -37,6 +56,29 @@ test('accepts a complete transcript-only export', async () => {
     jsonFiles: 1,
     audioFiles: 0,
   });
+});
+
+test('ignores untracked scratch files ignored by Git', async () => {
+  const root = await createGitRepository();
+  await mkdir(join(root, '.superpowers', 'sdd'), { recursive: true });
+  await writeFile(join(root, '.superpowers', 'sdd', 'scratch.md'), 'local');
+
+  const report = await verifyRepository({ root, expectedIds: ['007'] });
+
+  assert.equal(report.transcripts, 1);
+});
+
+test('rejects a tracked file even when its path is Git-ignored', async () => {
+  const root = await createGitRepository();
+  const forbiddenPath = join(root, '.superpowers', 'sdd', 'proibido.txt');
+  await mkdir(join(root, '.superpowers', 'sdd'), { recursive: true });
+  await writeFile(forbiddenPath, 'não permitido');
+  await git(root, 'add', '--force', '.superpowers/sdd/proibido.txt');
+
+  await assert.rejects(
+    verifyRepository({ root, expectedIds: ['007'] }),
+    /arquivo não permitido.*proibido\.txt/i,
+  );
 });
 
 test('rejects any audio file even when it is outside transcript directories', async () => {

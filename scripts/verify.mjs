@@ -4,14 +4,18 @@ import {
   readFile,
   readdir,
 } from 'node:fs/promises';
+import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { basename, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import {
   assertTranscript,
   renderMarkdown,
 } from './export.mjs';
+
+const execFile = promisify(execFileCallback);
 
 const audioExtensions = new Set([
   '.3g2',
@@ -122,6 +126,29 @@ async function listFiles(root, relative = '') {
   return files;
 }
 
+async function listGitFiles(root) {
+  try {
+    const { stdout } = await execFile(
+      'git',
+      ['-C', root, 'rev-parse', '--is-inside-work-tree'],
+    );
+    if (stdout.trim() !== 'true') return undefined;
+  } catch (error) {
+    if (error.code === 128 || error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+
+  const { stdout } = await execFile(
+    'git',
+    ['-C', root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
+  );
+  return stdout.split('\0').filter(Boolean).sort();
+}
+
+async function listRepositoryFiles(root) {
+  return await listGitFiles(root) ?? listFiles(root);
+}
+
 async function hasAudioSignature(path) {
   const handle = await open(path, 'r');
   try {
@@ -193,12 +220,15 @@ export async function verifyRepository({
   maxTotalBytes = 1024 * 1024 * 1024,
 }) {
   const repositoryRoot = resolve(root);
-  const files = await listFiles(repositoryRoot);
+  const files = await listRepositoryFiles(repositoryRoot);
   const audioFiles = [];
   let totalBytes = 0;
 
   for (const relativePath of files) {
     const stats = await lstat(join(repositoryRoot, relativePath));
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Link simbólico não permitido: ${relativePath}`);
+    }
     totalBytes += stats.size;
     if (stats.size > maxFileBytes) {
       throw new Error(
