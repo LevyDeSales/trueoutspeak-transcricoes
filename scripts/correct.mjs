@@ -288,7 +288,10 @@ export async function runCorrection({
     }
 
     try {
-      await sync({ root: repositoryRoot });
+      const syncResult = await sync({ root: repositoryRoot });
+      for (const warning of syncResult?.warnings ?? []) {
+        output(`Aviso: ${warning}`);
+      }
     } catch (error) {
       const rollbackCandidate = await readFile(path);
       if (!rollbackCandidate.equals(writtenContent)) {

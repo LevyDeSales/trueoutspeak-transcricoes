@@ -3,8 +3,6 @@ import {
   mkdir,
   readFile,
   readdir,
-  rename,
-  rm,
   writeFile,
 } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -16,6 +14,10 @@ import {
   renderMarkdown,
   temporalAnomalyProfile,
 } from './export.mjs';
+import {
+  cleanupPathBestEffort,
+  promoteAtomically,
+} from './atomic-promotion.mjs';
 
 const transcriptName = /^tos-(\d{3})\.json$/;
 const derivedNames = [
@@ -27,16 +29,6 @@ const derivedNames = [
 
 function sha256(content) {
   return createHash('sha256').update(content).digest('hex');
-}
-
-async function exists(path) {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
 }
 
 async function currentBuffer(path) {
@@ -73,42 +65,11 @@ async function listMarkdownFiles(root, relative = 'markdown') {
   return files;
 }
 
-async function promoteStagedArtifacts({ root, stagingDirectory }) {
-  const backupDirectory = join(
-    root,
-    `.trueoutspeak-sync-backup-${randomUUID()}`,
-  );
-  const backedUp = [];
-  const promoted = [];
-  await mkdir(backupDirectory);
-
-  try {
-    for (const name of derivedNames) {
-      const target = join(root, name);
-      if (await exists(target)) {
-        await rename(target, join(backupDirectory, name));
-        backedUp.push(name);
-      }
-    }
-
-    for (const name of derivedNames) {
-      await rename(join(stagingDirectory, name), join(root, name));
-      promoted.push(name);
-    }
-  } catch (error) {
-    for (const name of promoted.reverse()) {
-      await rm(join(root, name), { recursive: true, force: true });
-    }
-    for (const name of backedUp.reverse()) {
-      await rename(join(backupDirectory, name), join(root, name));
-    }
-    throw error;
-  } finally {
-    await rm(backupDirectory, { recursive: true, force: true });
-  }
-}
-
-export async function syncTranscripts({ root, check = false }) {
+export async function syncTranscripts({
+  root,
+  check = false,
+  promotionOperations,
+}) {
   const repositoryRoot = resolve(root);
   const jsonDirectory = join(repositoryRoot, 'json');
   const files = (await readdir(jsonDirectory))
@@ -123,6 +84,7 @@ export async function syncTranscripts({ root, check = false }) {
   const transcripts = [];
   const transcriptDocuments = [];
   const manifest = [];
+  const warnings = [];
 
   await mkdir(stagingMarkdownDirectory, { recursive: true });
   try {
@@ -204,12 +166,22 @@ export async function syncTranscripts({ root, check = false }) {
     changed.sort();
 
     if (!check && changed.length > 0) {
-      await promoteStagedArtifacts({ root: repositoryRoot, stagingDirectory });
+      const promotion = await promoteAtomically({
+        destinationDirectory: repositoryRoot,
+        stagingDirectory,
+        names: derivedNames,
+        backupPrefix: '.trueoutspeak-sync-backup-',
+        operations: promotionOperations,
+      });
+      warnings.push(...promotion.warnings);
     }
 
-    return { changed, transcripts: transcripts.length };
+    return { changed, transcripts: transcripts.length, warnings };
   } finally {
-    await rm(stagingDirectory, { recursive: true, force: true });
+    warnings.push(...await cleanupPathBestEffort(stagingDirectory, {
+      operations: promotionOperations,
+      description: 'staging de sincronização',
+    }));
   }
 }
 
@@ -231,6 +203,9 @@ if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(impo
     console.error(`Artefatos derivados divergentes: ${result.changed.join(', ')}`);
     process.exitCode = 1;
   } else {
+    for (const warning of result.warnings) {
+      console.error(`Aviso: ${warning}`);
+    }
     console.log(`${result.transcripts} transcrições sincronizadas.`);
   }
 }

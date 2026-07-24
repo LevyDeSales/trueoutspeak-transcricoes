@@ -24,6 +24,7 @@ test('exports structured JSON byte-for-byte and a readable timestamped Markdown 
 
   assert.equal(result.count, 1);
   assert.deepEqual(result.ids, ['007']);
+  assert.deepEqual(result.warnings, []);
 
   const sourceJson = await readFile(join(source, 'tos-007.json'));
   const exportedJson = await readFile(join(destination, 'json', 'tos-007.json'));

@@ -1,11 +1,8 @@
 import {
-  lstat,
   mkdir,
   readFile,
   readdir,
   realpath,
-  rename,
-  rm,
   writeFile,
 } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -18,6 +15,11 @@ import {
   sep,
 } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  cleanupPathBestEffort,
+  promoteAtomically,
+} from './atomic-promotion.mjs';
 
 const transcriptName = /^tos-(\d{3})\.json$/;
 
@@ -304,66 +306,11 @@ function sha256(content) {
   return createHash('sha256').update(content).digest('hex');
 }
 
-async function exists(path) {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
-}
-
-async function promoteStagedExport({
-  destinationDirectory,
-  stagingDirectory,
-  names,
+export async function exportTranscripts({
+  source,
+  destination,
+  promotionOperations,
 }) {
-  const backupDirectory = join(
-    destinationDirectory,
-    `.trueoutspeak-export-backup-${randomUUID()}`,
-  );
-  const backedUp = [];
-  const promoted = [];
-  await mkdir(backupDirectory);
-
-  try {
-    for (const name of names) {
-      const target = join(destinationDirectory, name);
-      if (await exists(target)) {
-        await rename(target, join(backupDirectory, name));
-        backedUp.push(name);
-      }
-    }
-
-    for (const name of names) {
-      await rename(
-        join(stagingDirectory, name),
-        join(destinationDirectory, name),
-      );
-      promoted.push(name);
-    }
-  } catch (error) {
-    for (const name of promoted.reverse()) {
-      await rm(join(destinationDirectory, name), {
-        recursive: true,
-        force: true,
-      });
-    }
-    for (const name of backedUp.reverse()) {
-      await rename(
-        join(backupDirectory, name),
-        join(destinationDirectory, name),
-      );
-    }
-    throw error;
-  } finally {
-    await rm(stagingDirectory, { recursive: true, force: true });
-    await rm(backupDirectory, { recursive: true, force: true });
-  }
-}
-
-export async function exportTranscripts({ source, destination }) {
   const sourceDirectory = resolve(source);
   const destinationDirectory = resolve(destination);
   await mkdir(destinationDirectory, { recursive: true });
@@ -400,6 +347,7 @@ export async function exportTranscripts({ source, destination }) {
   const transcripts = [];
   const transcriptDocuments = [];
   const manifest = [];
+  const warnings = [];
 
   try {
     for (const filename of files) {
@@ -473,7 +421,7 @@ export async function exportTranscripts({ source, destination }) {
       'utf8',
     );
 
-    await promoteStagedExport({
+    const promotion = await promoteAtomically({
       destinationDirectory,
       stagingDirectory,
       names: [
@@ -483,15 +431,21 @@ export async function exportTranscripts({ source, destination }) {
         'MANIFEST.sha256',
         'temporal-anomalies.json',
       ],
+      backupPrefix: '.trueoutspeak-export-backup-',
+      operations: promotionOperations,
     });
-  } catch (error) {
-    await rm(stagingDirectory, { recursive: true, force: true });
-    throw error;
+    warnings.push(...promotion.warnings);
+  } finally {
+    warnings.push(...await cleanupPathBestEffort(stagingDirectory, {
+      operations: promotionOperations,
+      description: 'staging de exportação',
+    }));
   }
 
   return {
     count: transcripts.length,
     ids: transcripts.map((transcript) => transcript.id),
+    warnings,
   };
 }
 
@@ -516,5 +470,8 @@ function parseArguments(argv) {
 
 if (process.argv[1] && basename(process.argv[1]) === basename(fileURLToPath(import.meta.url))) {
   const result = await exportTranscripts(parseArguments(process.argv.slice(2)));
+  for (const warning of result.warnings) {
+    console.error(`Aviso: ${warning}`);
+  }
   console.log(`Exportadas ${result.count} transcrições.`);
 }

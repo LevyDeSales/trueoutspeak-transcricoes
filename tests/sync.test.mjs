@@ -43,6 +43,7 @@ test('regenerates Markdown, index, and manifest from canonical fixture JSON', as
       'temporal-anomalies.json',
     ],
     transcripts: 1,
+    warnings: [],
   });
 
   const transcript = JSON.parse(
@@ -98,6 +99,7 @@ test('check reports derived-artifact drift without modifying files', async () =>
   assert.deepEqual(result, {
     changed: ['markdown/tos-007.md'],
     transcripts: 1,
+    warnings: [],
   });
   assert.equal(await readFile(markdownPath, 'utf8'), 'Markdown desatualizado\n');
 });

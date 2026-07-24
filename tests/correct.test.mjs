@@ -573,3 +573,29 @@ test('runCorrection preserves compact JSON style for no-op and small corrections
   );
   assert.equal(JSON.parse(afterChanged).segments[0].text, 'Outro texto.');
 });
+
+test('runCorrection reports sync cleanup warnings without rolling back JSON', async () => {
+  const root = await createRoot();
+  const path = join(root, 'json', 'tos-007.json');
+  const output = [];
+
+  const result = await runCorrection({
+    root,
+    episode: '007',
+    selector: { id: 'seg-0001' },
+    expectedText: 'Primeiro trecho.',
+    text: 'Outro texto.',
+    confirm: async () => true,
+    sync: async () => ({
+      warnings: ['Cleanup pendente; backup preservado em /tmp/backup.'],
+    }),
+    output: (line) => output.push(line),
+  });
+
+  assert.equal(result.written, true);
+  assert.equal(
+    JSON.parse(await readFile(path, 'utf8')).segments[0].text,
+    'Outro texto.',
+  );
+  assert.match(output.join('\n'), /aviso.*cleanup.*backup/i);
+});
